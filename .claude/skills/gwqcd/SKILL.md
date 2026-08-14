@@ -13,8 +13,8 @@ when_to_use: |
     - "where is branch X checked out?"
 
   Do NOT use this skill when the user wants any of:
-    - creating a worktree, or one for a branch that has none yet (use `gwqget`)
-    - cloning a repository that is not on disk (use `gwqget` or `ghq get`)
+    - creating a worktree, or one for a branch that has none yet (use `gwqpull`)
+    - cloning a repository that is not on disk (use `gwqpull` or `ghq get`)
     - the main clone rather than a linked worktree (use `ghqcd`)
     - creating a brand-new remote repo (use `ghnew`)
     - removing a worktree (`gwq remove` — destructive, ask the user first)
@@ -128,7 +128,7 @@ diagnostics share the stream, so select the line starting with `{` —
 `2>&1 >/dev/null | grep -m1 '^{' | jq -r .error.code` — rather than piping the
 whole stream to `jq`.
 
-On `E_NO_MATCH`, the worktree does not exist yet. Say so and offer `gwqget`
+On `E_NO_MATCH`, the worktree does not exist yet. Say so and offer `gwqpull`
 (which creates one); do NOT retry with a mutated query, and do NOT run
 `gwq add` without asking.
 

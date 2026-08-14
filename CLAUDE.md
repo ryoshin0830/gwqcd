@@ -23,7 +23,7 @@ A small Node.js CLI (~650 lines, zero runtime dependencies) that:
 
 Single source of behavior: `bin/gwqcd.mjs`.
 
-Sibling packages built to the same contract: `ghqcd`, `gwqget`, `ghnew`. The
+Sibling packages built to the same contract: `ghqcd`, `gwqpull`, `ghnew`. The
 invariants below are deliberately near-identical to `ghqcd`'s; when you change
 one, check whether the other needs the same change.
 
@@ -47,7 +47,7 @@ the shell tries to `cd` into.
 
 ### I2. `--init` is a flag, not a subcommand
 
-`gwqcd init zsh` would be ambiguous in the sibling `gwqget`, whose positional is
+`gwqcd init zsh` would be ambiguous in the sibling `gwqpull`, whose positional is
 a repository spec. All four tools in this family therefore spell it
 `--init <shell>`. Do not "fix" this to match zoxide.
 
@@ -281,7 +281,7 @@ drive the interactive fzf UI by piping keystrokes into `script` — fzf reads
 
 ## Things that are intentionally NOT here
 
-- **Creating worktrees.** `gwqcd` navigates; `gwqget` creates. Keep the split.
+- **Creating worktrees.** `gwqcd` navigates; `gwqpull` creates. Keep the split.
 - **Deleting worktrees.** `gwq remove` exists and is destructive; wrapping it
   behind a fuzzy picker is a foot-gun.
 - **A richer fzf display** (repo + branch columns via `--with-nth`). The path
