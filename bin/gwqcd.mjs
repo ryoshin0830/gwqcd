@@ -1,8 +1,10 @@
 #!/usr/bin/env node
-import { spawnSync } from 'node:child_process';
+import { spawnSync, spawn } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { Buffer } from 'node:buffer';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join as joinPath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // Read from package.json rather than a hand-maintained constant: `npm version`
@@ -440,16 +442,129 @@ async function confirmYesNo(question) {
 // the original zsh function piped both gwq and jq through `2>/dev/null`. Parse
 // defensively rather than reproducing that shrug: a genuine gwq failure should
 // still be distinguishable from an empty list.
-function listWorktrees() {
-  const args = values.local ? ['list', '--json'] : ['list', '-g', '--json'];
+// `gwq list -g` takes 7.6 seconds on 44 worktrees — it walks the base directory
+// and shells out to git for every entry it finds, including project files and
+// nested submodules. `ghq list -p` costs 0.1s, which is why gwqcd felt broken
+// next to ghqcd.
+//
+// gwq's own rule for -g is "all worktrees in the configured base directory", so
+// that rule is what gets implemented here: ask gwq for the base directory, walk
+// it, and stop descending the moment a worktree is found. Metadata comes from
+// git, and only for the entries that actually need it.
+//
+// Measured on the same 44: 12ms to walk, 231ms to resolve every branch and sha,
+// 272ms worst case against 7600ms. The interactive path needs no metadata at
+// all, so it lands in about 50ms.
+//
+// The one entry this drops that gwq reported is a submodule checkout nested
+// inside a worktree — its own repository, not a worktree anyone wants to cd to.
+
+function gwqBasedir() {
+  const r = spawnSync('gwq', ['config', 'get', 'worktree.basedir'], { encoding: 'utf8' });
+  if (r.status !== 0) return '';
+  let v = (r.stdout ?? '').trim().split('\n')[0]?.trim() ?? '';
+  if (!v) return '';
+  // gwq stores the tilde literally; it expands it, so we must too.
+  if (v === '~') return homedir();
+  if (v.startsWith('~/')) v = joinPath(homedir(), v.slice(2));
+  return v;
+}
+
+// Prune at the worktree. Descending into one means walking node_modules and
+// vendor trees, which is where gwq's own second-plus goes.
+function walkWorktrees(dir, depth = 0, out = []) {
+  if (depth > 8) return out;
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return out; // unreadable or vanished mid-walk
+  }
+  if (entries.some((e) => e.name === '.git')) {
+    out.push(dir);
+    return out;
+  }
+  for (const e of entries) {
+    if (e.isDirectory() && !e.isSymbolicLink()) walkWorktrees(joinPath(dir, e.name), depth + 1, out);
+  }
+  return out;
+}
+
+// One git call per worktree yields all three fields at once. `--git-dir` is the
+// is-main test: a linked worktree reports <repo>/.git/worktrees/<name>.
+function metaFromRevParse(lines) {
+  const [commit = '', branch = '', gitDir = ''] = lines;
+  return {
+    branch: branch === 'HEAD' ? '' : branch, // detached
+    commit,
+    isMain: !/[/\\]\.git[/\\]worktrees[/\\]/.test(gitDir),
+  };
+}
+
+function revParse(path) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      // Order matters: --abbrev-ref applies to every rev that follows it, so
+      // asking for the sha first is the only way to get both the sha and the
+      // branch. Reversed, `commit` comes back holding the branch name.
+      child = spawn('git', ['-C', path, 'rev-parse', 'HEAD', '--abbrev-ref', 'HEAD', '--git-dir'],
+        { stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch {
+      return resolve(null);
+    }
+    let out = '';
+    child.stdout.on('data', (d) => { out += d; });
+    child.on('error', () => resolve(null));
+    child.on('close', (code) => resolve(code === 0 ? out.trim().split('\n') : null));
+  });
+}
+
+async function resolveMeta(paths, into) {
+  const todo = paths.filter((p) => !into.has(p));
+  let i = 0;
+  await Promise.all(Array.from({ length: Math.min(16, todo.length) }, async () => {
+    while (i < todo.length) {
+      const p = todo[i++];
+      const lines = await revParse(p);
+      into.set(p, lines
+        ? { path: p, ...metaFromRevParse(lines) }
+        : { path: p, branch: '', commit: '', isMain: false });
+    }
+  }));
+  return into;
+}
+
+// git is the authority for a single repository, and it is instant.
+function localWorktrees() {
+  const r = spawnSync('git', ['worktree', 'list', '--porcelain'], { encoding: 'utf8' });
+  if (r.status !== 0) return []; // outside a repository is a normal miss
+  const out = [];
+  let path = '';
+  let commit = '';
+  for (const line of (r.stdout ?? '').split('\n')) {
+    if (line.startsWith('worktree ')) { path = line.slice(9); commit = ''; }
+    else if (line.startsWith('HEAD ')) commit = line.slice(5);
+    else if (line.startsWith('branch ')) {
+      out.push({ path, branch: line.slice(7).replace(/^refs\/heads\//, ''), commit, isMain: out.length === 0 });
+    } else if (line === 'detached' && path) {
+      out.push({ path, branch: '', commit, isMain: out.length === 0 });
+    }
+  }
+  return out;
+}
+
+// The last-resort path: if gwq will not tell us its base directory, or the
+// directory is gone, fall back to asking gwq itself. Slow but correct, and it
+// keeps exotic configurations working.
+function gwqListJson(args) {
   const r = spawnSync('gwq', args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   if (r.error) die('E_GWQ', `could not run gwq: ${r.error.message}`);
   const out = (r.stdout ?? '').trim();
   if (r.status !== 0) {
-    // A repo-scoped call outside any repository is a normal miss, not a crash.
-    if (values.local && /not a git repository/i.test(r.stderr ?? '')) return [];
     die('E_GWQ', `\`gwq ${args.join(' ')}\` failed: ${(r.stderr ?? '').trim() || `exit ${r.status}`}`);
   }
+  // With nothing to report gwq abandons --json and prints prose.
   if (!out || !out.startsWith('[')) return [];
   let parsed;
   try {
@@ -466,6 +581,22 @@ function listWorktrees() {
       commit: typeof w.commit_hash === 'string' ? w.commit_hash : '',
       isMain: !!w.is_main,
     }));
+}
+
+// Returns { paths, meta } where meta is a Map that may start empty: filling it
+// costs a git call per worktree, so callers ask for only what they print.
+function discoverWorktrees() {
+  if (values.local) {
+    const list = localWorktrees();
+    return { paths: list.map((w) => w.path), meta: new Map(list.map((w) => [w.path, w])) };
+  }
+  const basedir = gwqBasedir();
+  if (basedir) {
+    const paths = walkWorktrees(basedir);
+    if (paths.length) return { paths, meta: new Map() };
+  }
+  const list = gwqListJson(['list', '-g', '--json']);
+  return { paths: list.map((w) => w.path), meta: new Map(list.map((w) => [w.path, w])) };
 }
 
 // ── fzf ──────────────────────────────────────────────────────────────────────
@@ -607,10 +738,18 @@ async function main() {
   await ensureTool('gwq');
   await ensureTool('fzf');
 
-  let worktrees = listWorktrees();
-  if (values['no-main']) worktrees = worktrees.filter((w) => !w.isMain);
+  const found = discoverWorktrees();
+  const byPath = found.meta;
+  let paths = found.paths;
 
-  if (worktrees.length === 0) {
+  // Only --no-main needs every entry's metadata up front; everything else
+  // resolves the one it prints.
+  if (values['no-main']) {
+    await resolveMeta(paths, byPath);
+    paths = paths.filter((p) => !byPath.get(p)?.isMain);
+  }
+
+  if (paths.length === 0) {
     die('E_NO_MATCH', values.local
       ? 'this repository has no worktrees. Create one with `gwq add <branch>`.'
       : 'gwq knows about no worktrees. Create one with `gwq add <branch>`.');
@@ -618,8 +757,6 @@ async function main() {
 
   // fzf matches on the path, exactly as the original shell function did — the
   // path already encodes host, owner, repo and a branch slug.
-  const byPath = new Map(worktrees.map((w) => [w.path, w]));
-  const paths = worktrees.map((w) => w.path);
   const shape = (w) => ({
     path: w.path, branch: w.branch, commit: w.commit, isMain: w.isMain,
   });
@@ -629,6 +766,7 @@ async function main() {
     const shown = query ? fzfFilter(paths, query) : paths;
     if (shown.length === 0) die('E_NO_MATCH', `no worktree matched '${query}'`);
     if (isJson) {
+      await resolveMeta(shown, byPath);
       process.stdout.write(JSON.stringify({
         schemaVersion: SCHEMA_VERSION,
         count: shown.length,
@@ -660,6 +798,8 @@ async function main() {
     matches = 1;
   }
 
+  // --quiet prints only the path, so it never pays for a git call here.
+  if (!isQuiet) await resolveMeta([selected], byPath);
   const picked = byPath.get(selected) ?? { path: selected, branch: '', commit: '', isMain: false };
 
   // ── output ────────────────────────────────────────────────────────────────

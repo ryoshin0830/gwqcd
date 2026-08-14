@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, chmodSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, chmodSync, rmSync, mkdirSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -51,13 +51,15 @@ exit 2
   return dir;
 }
 
-function run(args, { shims } = {}) {
+function run(args, { shims, cwd } = {}) {
   const dir = shims ?? makeShims();
   const childEnv = { ...process.env, PATH: `${dir}:${process.env.PATH}`, NO_COLOR: '1' };
   // We force NO_COLOR; node itself warns to stderr when FORCE_COLOR is also
   // set, so a developer who exports it would otherwise see phantom failures.
   delete childEnv.FORCE_COLOR;
-  const r = spawnSync(process.execPath, [BIN, ...args], { encoding: 'utf8', env: childEnv });
+  const r = spawnSync(process.execPath, [BIN, ...args], {
+    encoding: 'utf8', env: childEnv, ...(cwd ? { cwd } : {}),
+  });
   if (!shims) rmSync(dir, { recursive: true, force: true });
   return r;
 }
@@ -240,9 +242,11 @@ test('a failing gwq surfaces as E_GWQ rather than an empty list', () => {
 });
 
 test('--local outside a repository is an empty list, not an error', () => {
-  const shims = makeShims({ gwqStatus: 1, gwqStderr: 'fatal: not a git repository' });
-  const r = run(['--local', '--json', 'x'], { shims });
-  rmSync(shims, { recursive: true, force: true });
+  // --local asks git directly now, so this has to actually run outside a
+  // repository rather than shimming gwq into failing.
+  const outside = mkdtempSync(join(tmpdir(), 'gwqcd-outside-'));
+  const r = run(['--local', '--json', 'x'], { cwd: outside });
+  rmSync(outside, { recursive: true, force: true });
   assert.equal(r.status, 2);
   assert.match(jsonLine(r.stderr).error.message, /this repository has no worktrees/);
 });
@@ -291,4 +295,111 @@ test('a missing git exits 127 — gwq shells out to it', () => {
   assert.equal(r.status, 127);
   assert.equal(jsonLine(r.stderr).error.code, 'E_DEPS');
   assert.match(jsonLine(r.stderr).error.message, /'git' not found/);
+});
+
+// ── the fast discovery path ──────────────────────────────────────────────────
+//
+// `gwq list -g` took 7.6 seconds on 44 worktrees; walking gwq's base directory
+// takes 12ms. These tests use a real basedir with real worktrees, because the
+// walk, the pruning and the metadata all come from the filesystem and git.
+
+function realBasedir() {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'gwqcd-base-')));
+  const repo = join(root, 'repo');
+  const base = join(root, 'worktrees');
+  mkdirSync(repo); mkdirSync(base);
+  const g = (cwd, ...a) => {
+    const r = spawnSync('git', a, { cwd, encoding: 'utf8' });
+    if (r.status !== 0) throw new Error(`git ${a.join(' ')}: ${r.stderr}`);
+    return (r.stdout ?? '').trim();
+  };
+  g(repo, 'init', '-q', '-b', 'main');
+  g(repo, 'config', 'user.email', 't@e.com');
+  g(repo, 'config', 'user.name', 'T');
+  writeFileSync(join(repo, 'a.txt'), 'x\n');
+  g(repo, 'add', '-A'); g(repo, 'commit', '-qm', 'init');
+  // Two linked worktrees under the basedir, one nested in a subdirectory the
+  // way gwq's template produces.
+  mkdirSync(join(base, 'host', 'owner', 'repo'), { recursive: true });
+  g(repo, 'worktree', 'add', '-q', '-b', 'feat/one', join(base, 'host', 'owner', 'repo', 'feat-one'));
+  g(repo, 'worktree', 'add', '-q', '-b', 'feat/two', join(base, 'host', 'owner', 'repo', 'feat-two'));
+  // A decoy that must not be walked into: files inside a worktree, including a
+  // nested repository of its own. gwq reports these; they are not worktrees.
+  const nested = join(base, 'host', 'owner', 'repo', 'feat-one', 'vendor', 'dep');
+  mkdirSync(nested, { recursive: true });
+  g(nested, 'init', '-q', '-b', 'main');
+  return { root, repo, base, sha: g(repo, 'rev-parse', 'HEAD') };
+}
+
+// A gwq that only answers `config get worktree.basedir`; anything else would be
+// the slow path, and reaching it here is a failure.
+function basedirShim(base) {
+  const dir = mkdtempSync(join(tmpdir(), 'gwqcd-bshim-'));
+  const p = join(dir, 'gwq');
+  writeFileSync(p, `#!/bin/sh
+[ "$1" = "--version" ] && { echo "gwq version v0.1.1"; exit 0; }
+if [ "$1" = "config" ] && [ "$2" = "get" ]; then echo "${base}"; exit 0; fi
+echo "gwq: slow path taken" >&2
+exit 9
+`);
+  chmodSync(p, 0o755);
+  const fzf = join(dir, 'fzf');
+  writeFileSync(fzf, `#!/bin/sh
+[ "$1" = "--version" ] && { echo 0.74.1; exit 0; }
+if [ "$1" = "--filter" ]; then out=$(grep -F -- "$2"); [ -n "$out" ] || exit 1; printf '%s\\n' "$out"; exit 0; fi
+exit 2
+`);
+  chmodSync(fzf, 0o755);
+  return dir;
+}
+
+test('worktrees are discovered by walking the base directory', () => {
+  const fx = realBasedir();
+  const shims = basedirShim(fx.base);
+  const r = run(['--list'], { shims });
+  rmSync(shims, { recursive: true, force: true });
+  rmSync(fx.root, { recursive: true, force: true });
+  assert.equal(r.status, 0, r.stderr);
+  const paths = r.stdout.trim().split('\n').sort();
+  assert.equal(paths.length, 2, 'exactly the two linked worktrees');
+  assert.ok(paths[0].endsWith('feat-one'));
+  assert.ok(paths[1].endsWith('feat-two'));
+  assert.doesNotMatch(r.stderr, /slow path/, 'gwq list must not be called');
+});
+
+test('the walk prunes at a worktree, so nested repositories are not listed', () => {
+  // Descending into a worktree is what cost gwq its second-plus, and a vendored
+  // submodule is not somewhere anyone wants to cd.
+  const fx = realBasedir();
+  const shims = basedirShim(fx.base);
+  const r = run(['--list'], { shims });
+  rmSync(shims, { recursive: true, force: true });
+  rmSync(fx.root, { recursive: true, force: true });
+  assert.doesNotMatch(r.stdout, /vendor\/dep/);
+});
+
+test('branch, commit and isMain come back correct — not the branch twice', () => {
+  // `git rev-parse --abbrev-ref HEAD HEAD` abbreviates *both* revs, so the
+  // first version of this shipped the branch name in the commit field.
+  const fx = realBasedir();
+  const shims = basedirShim(fx.base);
+  const r = run(['--list', '--json'], { shims });
+  rmSync(shims, { recursive: true, force: true });
+  rmSync(fx.root, { recursive: true, force: true });
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.count, 2);
+  const one = out.worktrees.find((w) => w.path.endsWith('feat-one'));
+  assert.equal(one.branch, 'feat/one');
+  assert.match(one.commit, /^[0-9a-f]{40}$/, 'a sha, not the branch name');
+  assert.equal(one.commit, fx.sha);
+  assert.equal(one.isMain, false, 'a linked worktree is not the main one');
+});
+
+test('an unreadable or absent basedir falls back to gwq rather than failing', () => {
+  const shims = basedirShim('/nonexistent/gwq/basedir');
+  const r = run(['--json', 'x'], { shims });
+  rmSync(shims, { recursive: true, force: true });
+  // The shim's `list` exits 9, which is the fallback being reached — the point
+  // is that it is reached at all rather than reporting an empty list.
+  assert.equal(jsonLine(r.stderr).error.code, 'E_GWQ');
 });

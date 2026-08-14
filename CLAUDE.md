@@ -110,6 +110,39 @@ sentence. The zsh original coped by piping both gwq and jq through
 
 Do not collapse these back into one `catch {}`.
 
+### I7b. Worktrees are found by walking gwq's base directory, not by `gwq list -g`
+
+`gwq list -g` walks the base directory and shells out to git for every entry it
+finds — including files inside worktrees and nested submodule checkouts. On 44
+worktrees that measured **7.6 seconds**, against 0.1s for `ghq list -p`, which
+is exactly why gwqcd felt broken next to ghqcd and why it was reported.
+
+gwq's own rule for `-g` is "all worktrees in the configured base directory", so
+that rule is what is implemented here:
+
+| step | cost |
+| --- | --- |
+| `gwq config get worktree.basedir` (tilde expanded by us) | 41ms |
+| `walkWorktrees()` — prune at the first `.git`, never descend into one | 12ms |
+| `resolveMeta()` — one `git rev-parse` per worktree, 16 at a time | 231ms |
+
+272ms worst case; the interactive path needs no metadata and lands near 50ms.
+Verified field-by-field against `gwq list -g --json`: all 43 entries identical
+on branch, commit and isMain. The 44th is a submodule checkout nested inside a
+worktree — its own repository, not somewhere to cd.
+
+Metadata is resolved lazily and only for what gets printed: `--quiet` pays for
+none, a single pick pays for one, `--list --json` and `--no-main` pay for all.
+
+`--local` asks `git worktree list --porcelain` directly. `gwqListJson()` remains
+as the fallback for when gwq will not name its base directory or the directory
+is gone — slow but correct, and it keeps exotic configurations working.
+
+**The argument order in `revParse` is load-bearing.** `--abbrev-ref` applies to
+every rev that follows it, so `rev-parse --abbrev-ref HEAD HEAD` returns the
+branch name twice. The sha must be asked for first; the first cut of this
+shipped the branch name in the `commit` field.
+
 ### I8. The branch name comes from gwq, not from the path
 
 `feat/login` is checked out in a directory named `feat-login`. The slug is

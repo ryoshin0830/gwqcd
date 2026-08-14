@@ -51,8 +51,16 @@ it keeps working after npm garbage-collects the npx cache. It is still worth a
 global install: `npx` adds about a second to every jump.
 
 Requires `git`, `gwq` and `fzf` on `PATH` (`brew install git fzf d-kuro/tap/gwq`),
-and Node >= 20.12. git is needed because `gwq` shells out to it. **No `jq`** —
-`gwq --json` is parsed in-process.
+and Node >= 20.12. **No `jq`.**
+
+### Speed
+
+`gwq list -g` shells out to git for every entry it finds under the base
+directory, including files inside worktrees: 7.6 seconds on 44 worktrees here.
+`gwqcd` implements gwq's rule — "all worktrees in the configured base
+directory" — by walking that directory and stopping at each worktree, then asks
+git for branch and commit only for the entries it is about to print. Same
+answers, about 50ms for a jump.
 
 ## Why `--init` exists
 
