@@ -138,6 +138,7 @@ prompt.
 
 - [`ghqcd`](https://github.com/ryoshin0830/ghqcd) — same idea for [ghq](https://github.com/x-motemen/ghq) repositories
 - [`gwqpull`](https://github.com/ryoshin0830/gwqpull) — clone with ghq, add a gwq worktree, and cd into it
+- [`gwqadd`](https://github.com/ryoshin0830/gwqadd) — create a branch and its gwq worktree in the repo you are in
 - [`ghnew`](https://github.com/ryoshin0830/ghnew) — create a GitHub repo, ghq-get it, and cd into it
 
 ## License
