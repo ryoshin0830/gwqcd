@@ -259,8 +259,12 @@ test('malformed JSON from gwq is reported, not silently swallowed', () => {
 
 test('a missing fzf exits 127 with the brew command', () => {
   const dir = mkdtempSync(join(tmpdir(), 'gwqcd-noshim-'));
-  writeFileSync(join(dir, 'gwq'), '#!/bin/sh\nexit 0\n');
-  chmodSync(join(dir, 'gwq'), 0o755);
+  // git too: it is checked before gwq, so omitting it would make this
+  // assert the wrong missing tool.
+  for (const n of ['git', 'gwq']) {
+    writeFileSync(join(dir, n), '#!/bin/sh\nexit 0\n');
+    chmodSync(join(dir, n), 0o755);
+  }
   const r = spawnSync(process.execPath, [BIN, '--json', 'x'], {
     encoding: 'utf8',
     env: { ...process.env, PATH: dir, NO_COLOR: '1' },
@@ -269,4 +273,22 @@ test('a missing fzf exits 127 with the brew command', () => {
   assert.equal(r.status, 127);
   assert.equal(jsonLine(r.stderr).error.code, 'E_DEPS');
   assert.match(jsonLine(r.stderr).error.message, /brew install fzf/);
+});
+
+test('a missing git exits 127 — gwq shells out to it', () => {
+  // Without git, `gwq` does not simply fail loudly: `gwq list --json` exits 0 printing "No worktrees found",
+  // which this tool would otherwise report as "no worktrees" to someone who has plenty.
+  const dir = mkdtempSync(join(tmpdir(), 'gwqcd-nogit-'));
+  for (const n of ['gwq', 'fzf']) {
+    writeFileSync(join(dir, n), '#!/bin/sh\nexit 0\n');
+    chmodSync(join(dir, n), 0o755);
+  }
+  const r = spawnSync(process.execPath, [BIN, '--json', 'x'], {
+    encoding: 'utf8',
+    env: { ...process.env, PATH: dir, NO_COLOR: '1' },
+  });
+  rmSync(dir, { recursive: true, force: true });
+  assert.equal(r.status, 127);
+  assert.equal(jsonLine(r.stderr).error.code, 'E_DEPS');
+  assert.match(jsonLine(r.stderr).error.message, /'git' not found/);
 });

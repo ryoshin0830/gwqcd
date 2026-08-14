@@ -340,6 +340,12 @@ function commandExists(cmd) {
 }
 
 const INSTALL = {
+  // git is not called directly, but gwq shells out to it — and without git
+  // `gwq list -g --json` exits 0 printing "No worktrees found", which this tool
+  // would faithfully report as an empty list. Checking for git here is the
+  // difference between "install git" and telling someone with 44 worktrees
+  // that they have none.
+  git: { brew: 'git', url: 'https://git-scm.com/downloads' },
   gwq: { brew: 'd-kuro/tap/gwq', url: 'https://github.com/d-kuro/gwq#installation' },
   fzf: { brew: 'fzf', url: 'https://github.com/junegunn/fzf#installation' },
 };
@@ -597,6 +603,7 @@ function copyToClipboard(text) {
 // ── main flow ────────────────────────────────────────────────────────────────
 
 async function main() {
+  await ensureTool('git');
   await ensureTool('gwq');
   await ensureTool('fzf');
 

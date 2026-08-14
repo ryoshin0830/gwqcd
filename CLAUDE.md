@@ -45,6 +45,11 @@ This is not cosmetic. `--quiet` stdout is consumed by `$(…)` inside the
 generated shell function; anything else on that stream becomes part of the path
 the shell tries to `cd` into.
 
+### I1b. git is a dependency even though it is never called directly
+
+`gwq list --json` exits **0** printing "No worktrees found" without it, which this tool would faithfully relay as an empty list — telling someone with 44 worktrees that they have none. So `git` is checked with the others, and the user gets "install git"
+instead of a puzzle. Verified by removing git from PATH; there is a test.
+
 ### I2. `--init` is a flag, not a subcommand
 
 `gwqcd init zsh` would be ambiguous in the sibling `gwqpull`, whose positional is

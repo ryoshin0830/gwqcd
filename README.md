@@ -50,8 +50,9 @@ then the script that generated the snippet, then `npx -y gwqcd@<version>` — so
 it keeps working after npm garbage-collects the npx cache. It is still worth a
 global install: `npx` adds about a second to every jump.
 
-Requires `gwq` and `fzf` on `PATH` (`brew install fzf d-kuro/tap/gwq`), and
-Node >= 20.12. **No `jq`** — `gwq --json` is parsed in-process.
+Requires `git`, `gwq` and `fzf` on `PATH` (`brew install git fzf d-kuro/tap/gwq`),
+and Node >= 20.12. git is needed because `gwq` shells out to it. **No `jq`** —
+`gwq --json` is parsed in-process.
 
 ## Why `--init` exists
 
