@@ -236,6 +236,14 @@ and `fzf` shims on `PATH`. It covers every code path reachable without a
 terminal — including all four I7 branches and the I8 branch-name case — plus
 `zsh -n` / `bash -n` / `fish -n` syntax checks on the `--init` output.
 
+**Tests must be hermetic against the developer's own environment.** `run()`
+deletes `FORCE_COLOR` from the child env because we set `NO_COLOR`, and node
+warns to stderr when it sees both — which made the suite fail on a machine that
+exported `FORCE_COLOR`, and only at `npm publish` time via `prepublishOnly`.
+Assertions that stderr is empty go through `ourStderr()`, which strips
+`(node:NNN) Warning:` lines first. Never assert on raw `r.stderr` being `''`:
+stderr is a shared stream, and node's warnings are not ours to control.
+
 The interactive fzf UI cannot be tested there. Run these by hand:
 
 | Scenario | Command | Expect |

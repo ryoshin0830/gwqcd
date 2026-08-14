@@ -53,16 +53,24 @@ exit 2
 
 function run(args, { shims } = {}) {
   const dir = shims ?? makeShims();
-  const r = spawnSync(process.execPath, [BIN, ...args], {
-    encoding: 'utf8',
-    env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, NO_COLOR: '1' },
-  });
+  const childEnv = { ...process.env, PATH: `${dir}:${process.env.PATH}`, NO_COLOR: '1' };
+  // We force NO_COLOR; node itself warns to stderr when FORCE_COLOR is also
+  // set, so a developer who exports it would otherwise see phantom failures.
+  delete childEnv.FORCE_COLOR;
+  const r = spawnSync(process.execPath, [BIN, ...args], { encoding: 'utf8', env: childEnv });
   if (!shims) rmSync(dir, { recursive: true, force: true });
   return r;
 }
 
 const jsonLine = (s) =>
   JSON.parse(s.split('\n').find((l) => l.startsWith('{')));
+
+// stderr is shared, not ours alone: node emits its own warnings there. Strip
+// them before asserting the program itself stayed silent.
+const ourStderr = (s) =>
+  s.split('\n')
+    .filter((l) => l && !/^\(node:\d+\)/.test(l) && !/^\(Use `node --trace-warnings/.test(l))
+    .join('\n');
 
 // ── --init ───────────────────────────────────────────────────────────────────
 
@@ -74,7 +82,7 @@ for (const shell of ['zsh', 'bash', 'fish']) {
     assert.match(r.stdout, /--quiet/, 'the function must call the binary in --quiet mode');
     assert.match(r.stdout, /npx -y/, 'npx must be the last-resort fallback');
     assert.ok(r.stdout.includes(BIN), 'the generating script path must be baked in');
-    assert.equal(r.stderr, '');
+    assert.equal(ourStderr(r.stderr), '');
   });
 }
 
@@ -122,7 +130,7 @@ test('--help exits 0 on stdout', () => {
   const r = run(['--help']);
   assert.equal(r.status, 0);
   assert.match(r.stdout, /USAGE/);
-  assert.equal(r.stderr, '');
+  assert.equal(ourStderr(r.stderr), '');
 });
 
 test('--version matches package.json', async () => {
