@@ -150,6 +150,17 @@ lossy, so `branch` must be carried from the gwq payload through to the output â€
 never re-derived from the path. This is the concrete thing the old
 `jq -r '.[].path'` pipeline threw away.
 
+### I8b. The function must not capture output that is not a path
+
+Every flag whose result goes to stdout has to be passed through uncaptured:
+`-h`, `--help`, `-V`, `--version`, `--init`, `--list`, `--json`. The wrapper adds
+`--quiet`, so `--json` would additionally collide with it and error out.
+
+This shipped broken in every one of these packages and was only found by running
+the emitted function rather than syntax-checking it â€” `zsh -n` is perfectly happy
+with a function that cds into a help page. There are tests now that install the
+function in zsh, bash and fish and run `--version` and `--help` through it.
+
 ### I9. `--json` schema (external contract)
 
 Selection:
