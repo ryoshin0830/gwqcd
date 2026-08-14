@@ -436,3 +436,28 @@ for (const shell of ['zsh', 'bash', 'fish']) {
     assert.doesNotMatch(r.stderr, /file name too long|cd:/);
   });
 }
+
+test('the emitted snippet tells people to use `command`', () => {
+  // `eval "$(<pkg> --init zsh)"` in ~/.zshrc resolves to the *function* on every
+  // re-source after the first, and a stale function captures this very output
+  // and hands it to cd. `command` skips functions. The header comment is the
+  // line people copy, so it has to be the correct one.
+  for (const shell of ['zsh', 'bash']) {
+    const out = run(['--init', shell]).stdout;
+    assert.match(out, /eval "\$\(command gwqcd --init (zsh|bash)\)"/,
+      `${shell} header must recommend the command form`);
+  }
+  assert.match(run(['--init', 'fish']).stdout, /command gwqcd --init fish \| source/);
+});
+
+test('re-sourcing is idempotent even with a stale function defined', (t) => {
+  if (spawnSync('zsh', ['-c', 'true'], { stdio: 'ignore' }).error) return t.skip('zsh missing');
+  const init = run(['--init', 'zsh']).stdout;
+  // A pre-`command` function: captures stdout and cds into it, whatever it is.
+  const stale = `gwqcd() { local d; d=$(echo stale) || return $?; builtin cd -- "$d"; }`;
+  const script = [stale, init, 'gwqcd --version'].join('\n');
+  const r = spawnSync('zsh', ['-c', script], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^gwqcd \d+\.\d+\.\d+/m, 'the new function must have replaced the stale one');
+  assert.doesNotMatch(r.stderr, /cd:|no such file/);
+});
