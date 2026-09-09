@@ -17,7 +17,7 @@ const SCHEMA_VERSION = 1;
 const PKG = 'gwqcd';
 const SELF = fileURLToPath(import.meta.url);
 
-const HELP = `${PKG} ${VERSION} — pick a git worktree managed by gwq with fzf and cd into it.
+const HELP = `${PKG} ${VERSION} — pick a git worktree with fzf and cd into it, wherever it lives.
 
 USAGE
   ${PKG} [options] [<query>]
@@ -29,6 +29,7 @@ OPTIONS
   --query <q>        initial fzf query (same as the positional argument)
   --local            only the current repository's worktrees (default: all)
   --no-main          hide main worktrees, leaving only linked ones
+  --source <list>    limit to gwq | claude | herdr | other | all (default: all)
   --list             print every candidate instead of picking one
   --json             stdout = 1-line JSON, never opens the fzf UI
   --quiet            stdout = path only (this is what the shell function uses)
@@ -37,11 +38,21 @@ OPTIONS
   -V, --version      show version
 
 EXAMPLES
-  ${PKG}                        fzf over every worktree gwq knows about
+  ${PKG}                        fzf over every worktree on the machine
   ${PKG} rate-limit             fzf pre-filtered; auto-picks a unique match
   ${PKG} --local                only this repository's worktrees
   ${PKG} --list --no-main       every linked worktree, one path per line
   ${PKG} --json rate-limit      machine-readable best match
+  ${PKG} --source gwq           a picker with no agent worktrees in it
+
+WHERE IT LOOKS
+  gwq      the directory named by \`gwq config get worktree.basedir\`
+  claude   <repo>/.claude/worktrees/… for every repository under \`ghq root\`,
+           and inside every worktree found above — what \`claude -w\` creates
+  herdr    ~/.herdr/worktrees/<repo>/…
+
+  Repositories outside ghq's root are not searched. ghq itself is optional:
+  without it, the claude source is simply empty.
 
 WHY --init
   A child process cannot change its parent shell's directory, so \`npx ${PKG}\`
@@ -57,9 +68,9 @@ OUTPUT
     Ctrl-C       exit 130
 
   --json mode prints 1 line of JSON to stdout:
-    {"schemaVersion":1,"path":"…","branch":"…","commit":"…","isMain":false,"matches":1}
+    {"schemaVersion":1,"path":"…","branch":"…","commit":"…","isMain":false,"source":"gwq","matches":1}
   with --list:
-    {"schemaVersion":1,"count":2,"worktrees":[{"path":"…","branch":"…","commit":"…","isMain":false}]}
+    {"schemaVersion":1,"count":2,"worktrees":[{"path":"…","branch":"…","commit":"…","isMain":false,"source":"claude"}]}
 
   On error in --json mode, stdout is empty and stderr gets:
     {"schemaVersion":1,"error":{"code":"E_NO_MATCH","message":"…"},"exitCode":2}
@@ -102,6 +113,7 @@ try {
       query: { type: 'string' },
       local: { type: 'boolean' },
       'no-main': { type: 'boolean' },
+      source: { type: 'string' },
       list: { type: 'boolean' },
       json: { type: 'boolean' },
       quiet: { type: 'boolean' },
@@ -196,7 +208,7 @@ const fishq = (s) => `'${String(s).replaceAll('\\', '\\\\').replaceAll("'", "\\'
 // function usually shares its name with the binary, so a function-aware
 // lookup would find the function and recurse forever.
 function shellInit(shell, fnName) {
-  const desc = 'Pick a gwq worktree with fzf and cd into it';
+  const desc = 'Pick a git worktree with fzf and cd into it';
   const v = `${PKG}@${VERSION}`;
   const slug = fnName.replaceAll(/[^A-Za-z0-9_]/g, '_');
 
@@ -347,6 +359,25 @@ if (values.json && values.quiet) {
 }
 if (values.cmd != null) {
   die('E_VALIDATION', '--cmd is only meaningful together with --init');
+}
+
+// A worktree's source is the tool whose convention put it where it is. `other`
+// is only reachable through --local: global discovery walks exactly the three
+// roots that produce the other three.
+const SOURCES = ['gwq', 'claude', 'herdr', 'other'];
+const SOURCE_LIST = `${SOURCES.join(' | ')} | all`;
+
+// null means every source, which is the default.
+let selectedSources = null;
+if (values.source != null) {
+  const requested = values.source.split(',').map((v) => v.trim()).filter(Boolean);
+  const bad = requested.filter((v) => v !== 'all' && !SOURCES.includes(v));
+  if (requested.length === 0 || bad.length) {
+    die('E_VALIDATION', bad.length
+      ? `--source: unknown ${bad.length > 1 ? 'sources' : 'source'} ${bad.join(', ')}. Valid: ${SOURCE_LIST}`
+      : `--source expects a comma-separated list of ${SOURCE_LIST}`);
+  }
+  if (!requested.includes('all')) selectedSources = new Set(requested);
 }
 if (positionals.length > 1) {
   die('E_VALIDATION', `unexpected extra arguments: ${positionals.slice(1).join(' ')}`);
@@ -756,6 +787,30 @@ function usableRoots(specs) {
   return out;
 }
 
+// git reports paths, not provenance, so a --local listing has to recognise the
+// roots by shape. The .claude test and the herdr root are free; the gwq label
+// is the one that costs a subprocess, which is why the caller gates this.
+async function labelLocal(paths, into) {
+  const basedir = await gwqBasedir();
+  const roots = [];
+  for (const [dir, source] of [[basedir, 'gwq'], [herdrRoot(), 'herdr']]) {
+    if (!dir) continue;
+    try { roots.push([realpathSync(dir), source]); } catch { /* not a root */ }
+  }
+  for (const p of paths) into.set(p, classifySource(p, roots));
+}
+
+// A `claude -w` worktree inside a gwq worktree is under the gwq base directory
+// *and* has .claude/worktrees in its path, so the claude test has to come
+// first: the innermost convention is the one that made the directory.
+function classifySource(path, roots) {
+  if (path.includes(`${sep}.claude${sep}worktrees${sep}`)) return 'claude';
+  for (const [dir, source] of roots) {
+    if (path === dir || path.startsWith(dir + sep)) return source;
+  }
+  return 'other';
+}
+
 // ── fzf ──────────────────────────────────────────────────────────────────────
 
 const PREVIEW = 'git -C {} log --oneline -10';
@@ -900,6 +955,20 @@ async function main() {
   const sourceOf = found.sources;
   let paths = found.paths;
 
+  // Global discovery knows the source by construction. --local gets its paths
+  // from git, which has no notion of one, so the label is derived from the path
+  // against the known roots — and only when something is going to read it,
+  // because the gwq label costs a subprocess.
+  if (values.local && (isJson || selectedSources)) await labelLocal(paths, sourceOf);
+
+  if (selectedSources) {
+    const before = paths.length;
+    paths = paths.filter((p) => selectedSources.has(sourceOf.get(p) ?? 'other'));
+    if (paths.length === 0 && before > 0) {
+      die('E_NO_MATCH', `no worktree came from ${[...selectedSources].join(' or ')}`);
+    }
+  }
+
   // Only --no-main needs every entry's metadata up front; everything else
   // resolves the one it prints.
   if (values['no-main']) {
@@ -916,9 +985,16 @@ async function main() {
 
   // fzf matches on the path, exactly as the original shell function did — the
   // path already encodes host, owner, repo and a branch slug.
-  const shape = (w) => ({
-    path: w.path, branch: w.branch, commit: w.commit, isMain: w.isMain,
-  });
+  const shape = (p) => {
+    const m = byPath.get(p) ?? { path: p, branch: '', commit: '', isMain: false };
+    return {
+      path: m.path,
+      branch: m.branch,
+      commit: m.commit,
+      isMain: m.isMain,
+      source: sourceOf.get(p) ?? 'other',
+    };
+  };
 
   // ── --list ────────────────────────────────────────────────────────────────
   if (values.list) {
@@ -929,7 +1005,7 @@ async function main() {
       process.stdout.write(JSON.stringify({
         schemaVersion: SCHEMA_VERSION,
         count: shown.length,
-        worktrees: shown.map((p) => shape(byPath.get(p))),
+        worktrees: shown.map((p) => shape(p)),
       }) + '\n');
     } else {
       process.stdout.write(shown.join('\n') + '\n');
@@ -965,7 +1041,7 @@ async function main() {
   if (isJson) {
     process.stdout.write(JSON.stringify({
       schemaVersion: SCHEMA_VERSION,
-      ...shape(picked),
+      ...shape(selected),
       matches,
     }) + '\n');
     return;

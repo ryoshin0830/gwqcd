@@ -195,6 +195,7 @@ test('--list --json carries branch, commit and isMain', () => {
     branch: 'feat/login',
     commit: 'bbb2222',
     isMain: false,
+    source: 'gwq',
   });
 });
 
@@ -600,6 +601,61 @@ test('the three roots together yield exactly the expected set', () => {
   rmSync(fx.home, { recursive: true, force: true });
   const want = EXPECTED.map(([rel]) => join(fx.home, rel)).sort();
   assert.deepEqual(got, want);
+});
+
+test('--list --json carries the source of every worktree', () => {
+  const fx = realHome();
+  const r = runIn(fx, ['--list', '--json']);
+  const out = JSON.parse(r.stdout);
+  rmSync(fx.home, { recursive: true, force: true });
+  const got = out.worktrees
+    .map((w) => [w.path.slice(fx.home.length + 1), w.source])
+    .sort((a, b) => a[0].localeCompare(b[0]));
+  assert.deepEqual(got, [...EXPECTED].sort((a, b) => a[0].localeCompare(b[0])));
+});
+
+test('--source gwq excludes the agent worktrees', () => {
+  const fx = realHome();
+  const r = runIn(fx, ['--list', '--source', 'gwq']);
+  const lines = r.stdout.trim().split('\n');
+  rmSync(fx.home, { recursive: true, force: true });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(lines, [join(fx.base, 'host/owner/repo/feat-one')]);
+});
+
+test('--source takes a comma-separated list', () => {
+  const fx = realHome();
+  const r = runIn(fx, ['--list', '--source', 'claude,herdr']);
+  const lines = r.stdout.trim().split('\n').sort();
+  rmSync(fx.home, { recursive: true, force: true });
+  const want = EXPECTED.filter(([, s]) => s !== 'gwq')
+    .map(([rel]) => join(fx.home, rel)).sort();
+  assert.deepEqual(lines, want);
+});
+
+test('--source all is the default and selects everything', () => {
+  const fx = realHome();
+  const a = runIn(fx, ['--list']);
+  const b = runIn(fx, ['--list', '--source', 'all']);
+  rmSync(fx.home, { recursive: true, force: true });
+  assert.equal(a.stdout, b.stdout);
+});
+
+test('an unknown --source value is E_VALIDATION and names the valid ones', () => {
+  const r = run(['--json', '--source', 'jujutsu']);
+  assert.equal(r.status, 1);
+  const e = jsonLine(r.stderr).error;
+  assert.equal(e.code, 'E_VALIDATION');
+  assert.match(e.message, /jujutsu/);
+  assert.match(e.message, /gwq \| claude \| herdr \| other \| all/);
+});
+
+test('--source with a query that filters everything out is E_NO_MATCH', () => {
+  const fx = realHome();
+  const r = runIn(fx, ['--json', '--source', 'herdr', 'feat-one']);
+  rmSync(fx.home, { recursive: true, force: true });
+  assert.equal(r.status, 2);
+  assert.equal(jsonLine(r.stderr).error.code, 'E_NO_MATCH');
 });
 
 // ── the emitted function, actually run ───────────────────────────────────────
