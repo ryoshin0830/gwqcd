@@ -193,6 +193,16 @@ root instead is the mistake I7c warns about two paragraphs down — a
 and the broad test deletes all of them. Both directions have tests, and both
 mutations are killed.
 
+A `readdir` Dirent is `lstat`, so a `.git` **symlinked** to a git directory
+elsewhere reports `isDirectory()` false and the main clone leaks again. That
+single case resolves with a `statSync`; every other one stays syscall-free.
+There is a test that relocates a fixture's `.git` and symlinks it back.
+
+A **bare** repository under an ghq root has no `.git` entry at all, so the walk
+does not prune there and descends into `objects/` and `refs/` until the depth
+guard stops it. It contributes no entries and no error — verified — and this is
+I7b behavior rather than anything I7c introduced.
+
 The peek happens at the moment of pruning, at every root, and recurses into a
 found worktree's own `.claude/worktrees` because an agent can start an agent.
 Only a child with a `.git` of its own counts — `.claude/worktrees` also holds

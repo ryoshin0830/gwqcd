@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, chmodSync, rmSync, mkdirSync, realpathSync, readFileSync, symlinkSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, chmodSync, rmSync, mkdirSync, realpathSync, readFileSync, symlinkSync, existsSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -983,6 +983,28 @@ test('$GHQ_ROOT loses to a working ghq, which is the authority', (t) => {
   const lines = r.stdout.trim().split('\n');
   assert.ok(lines.includes(real.agent), `ghq's own answer was ignored:\n${r.stdout}`);
   assert.ok(!lines.includes(decoy.agent), `$GHQ_ROOT overrode a working ghq:\n${r.stdout}`);
+});
+
+test('a main clone whose .git is a symlink still does not leak', (t) => {
+  // A Dirent is lstat, so a `.git` symlinked to a git directory elsewhere
+  // reports isDirectory() false and would be mistaken for a linked worktree —
+  // putting the main clone straight back into the list.
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'gwqcd-symgit-')));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const fx = repoAt(home, { repoRel: 'ghq/github.com/o/repo', agentSlug: 'agent-sym' });
+  // Move the repository's .git aside and symlink it back, the way a developer
+  // relocating a large object store would.
+  const moved = join(home, 'elsewhere.git');
+  renameSync(join(fx.repo, '.git'), moved);
+  symlinkSync(moved, join(fx.repo, '.git'), 'dir');
+  const shims = geometryShim({ basedir: home, ghqRoots: [join(home, 'ghq')] });
+  t.after(() => rmSync(shims, { recursive: true, force: true }));
+
+  const r = run(['--list'], { shims, env: { HOME: home } });
+  assert.equal(r.status, 0, r.stderr);
+  const lines = r.stdout.trim().split('\n');
+  assert.ok(!lines.includes(fx.repo),
+    `a main clone with a symlinked .git leaked:\n${r.stdout}`);
 });
 
 // ── the emitted function, actually run ───────────────────────────────────────

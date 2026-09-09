@@ -2,7 +2,7 @@
 import { spawnSync, spawn } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { Buffer } from 'node:buffer';
-import { readFileSync, readdirSync, existsSync, realpathSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join as joinPath, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -629,7 +629,13 @@ function walkWorktrees(dir, { emitAs, peekOnly = [], depth = 0, out = [] }) {
     // gwq worktrees under it, and suppressing those is the exact loss I7c
     // warns about. `.git` is a directory in a main clone and a file in a linked
     // worktree, which distinguishes them for one Dirent and no syscall.
-    const isMainClone = dotGit.isDirectory();
+    //
+    // Except when it is a symlink: a Dirent is lstat, so a `.git` symlinked to
+    // a git directory elsewhere reports isDirectory() false and the main clone
+    // would leak again. That one case pays a stat.
+    const isMainClone = dotGit.isSymbolicLink()
+      ? isDirectorySync(joinPath(dir, '.git'))
+      : dotGit.isDirectory();
     if (emitAs && !(isMainClone && isUnder(dir, peekOnly))) {
       out.push({ path: dir, source: emitAs });
     }
@@ -646,6 +652,15 @@ function walkWorktrees(dir, { emitAs, peekOnly = [], depth = 0, out = [] }) {
 
 function isUnder(path, prefixes) {
   return prefixes.some((p) => path === p || path.startsWith(p + sep));
+}
+
+// Follows symlinks, unlike a Dirent. A dangling one is not a directory.
+function isDirectorySync(path) {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 // .claude/worktrees can hold anything the agent left behind, so only a
