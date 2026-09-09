@@ -641,8 +641,12 @@ function walkWorktrees(dir, { emitAs, peekOnly = [], depth = 0, out = [] }) {
     // path inside `<repo>/.git/worktrees/`, which is the same test
     // metaFromRevParse applies to `rev-parse --git-dir`, so the two can no
     // longer disagree.
-    const suppress = isUnder(dir, peekOnly) && !isLinkedWorktree(dir);
-    if (emitAs && !suppress) {
+    // `emitAs` first, and short-circuit before `isLinkedWorktree`: the only
+    // peek-only root on an ordinary machine is the ghq root, whose walk has
+    // emitAs null, so computing `suppress` eagerly read 44 `.git` files and
+    // discarded every one of them. Now the read happens only in the overlap
+    // configuration that needs it.
+    if (emitAs && !(isUnder(dir, peekOnly) && !isLinkedWorktree(dir))) {
       out.push({ path: dir, source: emitAs });
     }
     collectClaudeWorktrees(dir, out);
@@ -703,7 +707,7 @@ function isLinkedWorktree(dir) {
 const MAX_AGENT_GENERATIONS = 8;
 
 function collectClaudeWorktrees(repo, out, generation = 0) {
-  if (generation > MAX_AGENT_GENERATIONS) return;
+  if (generation >= MAX_AGENT_GENERATIONS) return;
   const base = joinPath(repo, '.claude', 'worktrees');
   let entries;
   try {
@@ -896,8 +900,16 @@ function usableRoots(specs) {
     let real;
     try {
       real = realpathSync(dir);
+      // `realpath` succeeding is not the same as the directory being walkable,
+      // and I7d's fallback turns on exactly that distinction. A
+      // `worktree.basedir` typo'd onto a regular file realpaths fine and then
+      // throws ENOTDIR from readdir; `chmod 000` throws EACCES. Either one used
+      // to count as a usable gwq root, suppress the fallback, and lose every
+      // gwq worktree silently — the same shape as the ENOENT case, by a
+      // different errno. So prove it can be read.
+      readdirSync(real);
     } catch {
-      continue; // absent or unreadable: not a root
+      continue; // absent, not a directory, or unreadable: not a root
     }
     // Dedup on the pair, not on the directory. `GHQ_ROOT=~/ghq:~/ghq` walks the
     // same tree twice for nothing; but a basedir that *equals* an ghq root is

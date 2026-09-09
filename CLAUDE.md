@@ -204,17 +204,34 @@ path inside `<repo>/.git/worktrees/`.** `isLinkedWorktree()` reads the file and
 applies the same regex `metaFromRevParse` applies to `rev-parse --git-dir`, so
 the two can no longer disagree. A directory, or a symlink to one, throws EISDIR
 and reads as a main clone, which is what it is. It runs only for directories
-under a peek-only root — a handful, never the hot path. Tests cover the plain,
-the symlinked and the `--separate-git-dir` shapes.
+under a peek-only root — a handful, never the hot path — and the `emitAs` check
+short-circuits ahead of it. Computing the suppression eagerly read 44 `.git`
+files on this machine and discarded every one, because the only peek-only root
+is the ghq root and its walk emits nothing. Instrumented after the fix: zero
+reads. Tests cover the plain, the symlinked and the `--separate-git-dir` shapes.
+
+The shared regex carries a shared blind spot: it wants a literal `.git` path
+component, so a linked worktree of a `--separate-git-dir` or bare host —
+`gitdir: …/gitdirs/host.git/worktrees/feat` — reads as a main clone and is
+suppressed under a peek-only root. `metaFromRevParse` calls that same worktree
+`isMain: true`, so the two still agree, which was the goal; and it takes the
+basedir-ancestor configuration to matter at all. Closing it needs a second
+signal and a syscall. Documented rather than chased.
 
 **A bare repository is pruned.** `ghq get --bare` is a real flag, and a bare
 repo has no `.git` at all, so the walk used to descend its object store to the
 depth guard: measured at +40ms for one repo with a full 256-directory loose
 fanout. `looksBare()` recognises `HEAD` plus `objects` plus `refs` from entries
-already in hand, at no syscall cost. The blind spot this accepts is that an
-agent worktree planted *inside* a bare repository is not found — a bare repo
-has no working tree, so `claude -w` cannot run there, and the test asserts
-nothing inside one is ever listed.
+already in hand, at no syscall cost, and measured *faster* than descending:
+0.15s to 0.10s with the fanout present. No false positive is constructible —
+those three together occur only in a git directory, and the walk never enters
+one because it prunes at `.git` first.
+
+The blind spot this accepts is that nothing *inside* a bare directory is found:
+not an agent worktree planted there, and not a worktree checked out at
+`repo.git/main`. A bare repo has no working tree, so `claude -w` cannot run
+there; the second case is a real if unusual layout. The test asserts nothing
+inside one is ever listed.
 
 The peek happens at the moment of pruning, at every root, and recurses into a
 found worktree's own `.claude/worktrees` because an agent can start an agent.
@@ -240,7 +257,15 @@ twice.
 ### I7d. The `gwq list -g --json` fallback supplements; it does not replace
 
 The last resort is reached on exactly one condition: **the gwq base directory
-could not be walked** — gwq would not name it, or it is gone. Two other framings
+could not be walked** — gwq would not name it, it is gone, or it cannot be
+read. That last clause is the whole point of the condition and was wrong once:
+`usableRoots` decided from `realpath`, which succeeds on a `worktree.basedir`
+typo'd onto a regular file and on a `chmod 000` directory. Both then threw from
+`readdir`, walked to zero entries, counted as a usable gwq root and suppressed
+the fallback — losing every gwq worktree silently while a herdr worktree kept
+the list non-empty. Exactly the bug below, by ENOTDIR and EACCES instead of
+ENOENT. A root is usable only once its `readdir` has succeeded, and there is a
+test for each errno. Two other framings
 were tried and both were silent wrong answers:
 
 - *"fall back when nothing was found at all."* One herdr worktree makes the

@@ -1123,6 +1123,68 @@ test('agent nesting is not rationed by how deep the repository sits', (t) => {
     `${missing.length} of ${CHAIN * 2} agent worktrees were rationed away:\n${r.stdout}`);
 });
 
+// A gwq whose basedir is whatever the caller says and whose `list` reports one
+// worktree, so "did the fallback run" is directly observable.
+function fallbackShim({ basedir, ghqRoot }) {
+  const dir = mkdtempSync(join(tmpdir(), 'gwqcd-fbshim-'));
+  const write = (name, body) => {
+    writeFileSync(join(dir, name), body);
+    chmodSync(join(dir, name), 0o755);
+  };
+  write('gwq', `#!/bin/sh
+[ "$1" = "--version" ] && { echo "gwq version v0.1.1"; exit 0; }
+if [ "$1" = "config" ]; then echo "${basedir}"; exit 0; fi
+if [ "$1" = "list" ]; then cat <<'J'
+[{"path":"/elsewhere/api/feat-login","branch":"feat/login","commit_hash":"bbb2222","is_main":false}]
+J
+exit 0; fi
+exit 0
+`);
+  write('ghq', `#!/bin/sh
+[ "$1" = "--version" ] && { echo "ghq version 1.10.1"; exit 0; }
+[ "$1" = "root" ] && { echo "${ghqRoot}"; exit 0; }
+exit 9
+`);
+  write('fzf', `#!/bin/sh
+[ "$1" = "--version" ] && { echo 0.74.1; exit 0; }
+if [ "$1" = "--filter" ]; then out=$(grep -F -- "$2"); [ -n "$out" ] || exit 1; printf '%s\\n' "$out"; exit 0; fi
+exit 2
+`);
+  return dir;
+}
+
+for (const [label, prepare] of [
+  ['a regular file', (bd) => writeFileSync(bd, 'oops\n')],
+  ['an unreadable directory', (bd) => { mkdirSync(bd, { recursive: true }); chmodSync(bd, 0o000); }],
+]) {
+  test(`a basedir that is ${label} still reaches the fallback`, (t) => {
+    // realpath succeeding is not the same as the directory being walkable.
+    // Counting it as a usable root suppressed the fallback and lost every gwq
+    // worktree, silently, while a herdr worktree kept the list non-empty —
+    // the ENOENT case's bug by way of ENOTDIR and EACCES.
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'gwqcd-badbase-')));
+    const basedir = join(home, 'basedir');
+    t.after(() => {
+      try { chmodSync(basedir, 0o755); } catch { /* it is a file */ }
+      rmSync(home, { recursive: true, force: true });
+    });
+    const fx = repoAt(home, {
+      repoRel: 'ghq/github.com/o/repo',
+      worktreeRel: '.herdr/worktrees/repo/wt-herdr',
+    });
+    prepare(basedir);
+    const shims = fallbackShim({ basedir, ghqRoot: join(home, 'ghq') });
+    t.after(() => rmSync(shims, { recursive: true, force: true }));
+
+    const r = run(['--list'], { shims, env: { HOME: home } });
+    assert.equal(r.status, 0, r.stderr);
+    const lines = r.stdout.trim().split('\n');
+    assert.ok(lines.includes('/elsewhere/api/feat-login'),
+      `the fallback was suppressed and the gwq worktrees vanished:\n${r.stdout}`);
+    assert.ok(lines.includes(fx.worktree), `the herdr worktree should survive too:\n${r.stdout}`);
+  });
+}
+
 // ── the emitted function, actually run ───────────────────────────────────────
 //
 // A syntax check never caught this: with the function installed, every flag
