@@ -2,7 +2,7 @@
 import { spawnSync, spawn } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { Buffer } from 'node:buffer';
-import { readFileSync, readdirSync, existsSync, realpathSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join as joinPath, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -627,21 +627,34 @@ function walkWorktrees(dir, { emitAs, peekOnly = [], depth = 0, out = [] }) {
     // The test has to be "is this a main clone", not "is this under an ghq
     // root" — a `worktree.basedir` configured *inside* the ghq root puts real
     // gwq worktrees under it, and suppressing those is the exact loss I7c
-    // warns about. `.git` is a directory in a main clone and a file in a linked
-    // worktree, which distinguishes them for one Dirent and no syscall.
+    // warns about.
     //
-    // Except when it is a symlink: a Dirent is lstat, so a `.git` symlinked to
-    // a git directory elsewhere reports isDirectory() false and the main clone
-    // would leak again. That one case pays a stat.
-    const isMainClone = dotGit.isSymbolicLink()
-      ? isDirectorySync(joinPath(dir, '.git'))
-      : dotGit.isDirectory();
-    if (emitAs && !(isMainClone && isUnder(dir, peekOnly))) {
+    // `.git` being a directory looks like the cheap discriminator and is not
+    // one. A `.git` symlinked to a git directory is neither (a Dirent is
+    // lstat), and `git init --separate-git-dir` puts a plain regular file in a
+    // *main* clone — no symlink involved, which is what dotfile managers
+    // produce. Both leaked the clone, and the payload then contradicted itself:
+    // `isMain: true` from rev-parse beside a Dirent that said otherwise.
+    //
+    // So under a peek-only root — a handful of directories, never the hot path
+    // — decide with git's own invariant instead. Only a linked worktree names a
+    // path inside `<repo>/.git/worktrees/`, which is the same test
+    // metaFromRevParse applies to `rev-parse --git-dir`, so the two can no
+    // longer disagree.
+    const suppress = isUnder(dir, peekOnly) && !isLinkedWorktree(dir);
+    if (emitAs && !suppress) {
       out.push({ path: dir, source: emitAs });
     }
     collectClaudeWorktrees(dir, depth, out);
     return out;
   }
+  // A bare repository — `ghq get --bare` makes them — has no `.git` at all, so
+  // the walk would descend its object store to the depth guard: measured at
+  // +40ms for one repo with a full 256-directory loose fanout. It can hold no
+  // worktree of its own, so stop here. The cost is three name lookups on
+  // entries already in hand.
+  if (looksBare(entries)) return out;
+
   for (const e of entries) {
     if (e.isDirectory() && !e.isSymbolicLink()) {
       walkWorktrees(joinPath(dir, e.name), { emitAs, peekOnly, depth: depth + 1, out });
@@ -650,17 +663,33 @@ function walkWorktrees(dir, { emitAs, peekOnly = [], depth = 0, out = [] }) {
   return out;
 }
 
+function looksBare(entries) {
+  let head = false;
+  let objects = false;
+  let refs = false;
+  for (const e of entries) {
+    if (e.name === 'HEAD' && e.isFile()) head = true;
+    else if (e.name === 'objects' && e.isDirectory()) objects = true;
+    else if (e.name === 'refs' && e.isDirectory()) refs = true;
+  }
+  return head && objects && refs;
+}
+
 function isUnder(path, prefixes) {
   return prefixes.some((p) => path === p || path.startsWith(p + sep));
 }
 
-// Follows symlinks, unlike a Dirent. A dangling one is not a directory.
-function isDirectorySync(path) {
+// Only a linked worktree's `.git` names a path inside `<repo>/.git/worktrees/`.
+// A directory, or a symlink to one, throws EISDIR and reads as a main clone —
+// which is what it is.
+function isLinkedWorktree(dir) {
+  let text;
   try {
-    return statSync(path).isDirectory();
+    text = readFileSync(joinPath(dir, '.git'), 'utf8');
   } catch {
     return false;
   }
+  return /[/\\]\.git[/\\]worktrees[/\\]/.test(text);
 }
 
 // .claude/worktrees can hold anything the agent left behind, so only a

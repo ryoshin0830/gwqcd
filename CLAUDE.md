@@ -186,22 +186,35 @@ If `worktree.basedir` is an ancestor of an ghq root — or the same directory �
 the *gwq* walk reaches those main clones and emits them. Reordering the roots
 cannot help: an `emitAs: null` root records nothing, so it never wins the
 first-writer race. So a pruned directory under a peek-only root is suppressed
-**only when it is a main clone**, which `.git` decides for free: a directory in
-a main clone, a file in a linked worktree. Suppressing everything under the
-root instead is the mistake I7c warns about two paragraphs down — a
-`worktree.basedir` configured *inside* the ghq root holds real gwq worktrees,
-and the broad test deletes all of them. Both directions have tests, and both
-mutations are killed.
+**only when it is a main clone**. Suppressing everything under the root instead
+is the mistake I7c warns about two paragraphs down — a `worktree.basedir`
+configured *inside* the ghq root holds real gwq worktrees, and the broad test
+deletes all of them. Both directions have tests, and both mutations are killed.
 
-A `readdir` Dirent is `lstat`, so a `.git` **symlinked** to a git directory
-elsewhere reports `isDirectory()` false and the main clone leaks again. That
-single case resolves with a `statSync`; every other one stays syscall-free.
-There is a test that relocates a fixture's `.git` and symlinks it back.
+**"Is `.git` a directory" is not the way to answer that, and two cuts of this
+got it wrong.** A `readdir` Dirent is `lstat`, so a `.git` symlinked to a git
+directory reports `isDirectory()` false. Worse, `git init --separate-git-dir`
+puts a plain **regular file** in a *main* clone — no symlink anywhere, and it
+is what dotfile managers produce. Both leaked the clone, and the payload then
+contradicted itself: `isMain: true` from `rev-parse --git-dir` beside a Dirent
+test that had said otherwise, with `--no-main` quietly deleting the evidence.
 
-A **bare** repository under an ghq root has no `.git` entry at all, so the walk
-does not prune there and descends into `objects/` and `refs/` until the depth
-guard stops it. It contributes no entries and no error — verified — and this is
-I7b behavior rather than anything I7c introduced.
+The answer is git's own invariant: **only a linked worktree's `.git` names a
+path inside `<repo>/.git/worktrees/`.** `isLinkedWorktree()` reads the file and
+applies the same regex `metaFromRevParse` applies to `rev-parse --git-dir`, so
+the two can no longer disagree. A directory, or a symlink to one, throws EISDIR
+and reads as a main clone, which is what it is. It runs only for directories
+under a peek-only root — a handful, never the hot path. Tests cover the plain,
+the symlinked and the `--separate-git-dir` shapes.
+
+**A bare repository is pruned.** `ghq get --bare` is a real flag, and a bare
+repo has no `.git` at all, so the walk used to descend its object store to the
+depth guard: measured at +40ms for one repo with a full 256-directory loose
+fanout. `looksBare()` recognises `HEAD` plus `objects` plus `refs` from entries
+already in hand, at no syscall cost. The blind spot this accepts is that an
+agent worktree planted *inside* a bare repository is not found — a bare repo
+has no working tree, so `claude -w` cannot run there, and the test asserts
+nothing inside one is ever listed.
 
 The peek happens at the moment of pruning, at every root, and recurses into a
 found worktree's own `.claude/worktrees` because an agent can start an agent.

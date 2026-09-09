@@ -1007,6 +1007,65 @@ test('a main clone whose .git is a symlink still does not leak', (t) => {
     `a main clone with a symlinked .git leaked:\n${r.stdout}`);
 });
 
+test('a --separate-git-dir main clone does not leak — its .git is a plain file', (t) => {
+  // `git init --separate-git-dir` puts a regular file in a *main* clone, no
+  // symlink involved. It is what dotfile managers produce, and it breaks the
+  // "a .git file means a linked worktree" shortcut outright: the payload used
+  // to carry `isMain: true` beside a Dirent test that said otherwise.
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'gwqcd-sep-')));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const fx = repoAt(home, { repoRel: 'ghq/github.com/o/repo', agentSlug: 'agent-sep' });
+  const gitdir = join(home, 'gitdirs', 'repo.git');
+  mkdirSync(dirname(gitdir), { recursive: true });
+  renameSync(join(fx.repo, '.git'), gitdir);
+  writeFileSync(join(fx.repo, '.git'), `gitdir: ${gitdir}\n`);
+  const shims = geometryShim({ basedir: home, ghqRoots: [join(home, 'ghq')] });
+  t.after(() => rmSync(shims, { recursive: true, force: true }));
+
+  const r = run(['--list'], { shims, env: { HOME: home } });
+  assert.equal(r.status, 0, r.stderr);
+  const lines = r.stdout.trim().split('\n');
+  assert.ok(!lines.includes(fx.repo),
+    `a --separate-git-dir main clone leaked:\n${r.stdout}`);
+});
+
+test('a bare repository is pruned rather than walked', (t) => {
+  // `ghq get --bare` is a real flag, and a bare repo has no `.git` at all — so
+  // the walk used to enumerate its object store to the depth guard, +40ms for
+  // one repo with a full loose fanout. It can hold no worktree of its own.
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'gwqcd-bare-')));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const bare = join(home, 'ghq', 'github.com', 'o', 'repo.git');
+  mkdirSync(bare, { recursive: true });
+  const r0 = spawnSync('git', ['init', '-q', '--bare', bare], { encoding: 'utf8' });
+  assert.equal(r0.status, 0, r0.stderr);
+  // A decoy deep in the object store that the walk would *emit* if it
+  // descended: a directory with a .git, holding an agent worktree of its own.
+  // The peek labels that `claude` regardless of the root's emitAs, so it shows
+  // up in --list the moment the prune is removed.
+  const deep = join(bare, 'objects', 'ab', 'cd', 'planted');
+  const decoyAgent = join(deep, '.claude', 'worktrees', 'wt-in-objects');
+  mkdirSync(decoyAgent, { recursive: true });
+  writeFileSync(join(deep, '.git'), 'gitdir: /nowhere\n');
+  writeFileSync(join(decoyAgent, '.git'), 'gitdir: /nowhere/worktrees/wt\n');
+  const alongside = repoAt(home, { repoRel: 'ghq/github.com/o/normal', agentSlug: 'agent-n' });
+  mkdirSync(join(home, 'worktrees'), { recursive: true });
+  const shims = geometryShim({
+    basedir: join(home, 'worktrees'),
+    ghqRoots: [join(home, 'ghq')],
+  });
+  t.after(() => rmSync(shims, { recursive: true, force: true }));
+
+  const r = run(['--list'], { shims, env: { HOME: home } });
+  assert.equal(r.status, 0, r.stderr);
+  const lines = r.stdout.trim().split('\n').filter(Boolean);
+  assert.doesNotMatch(r.stdout, /objects/,
+    `the walk descended into a bare object store:\n${r.stdout}`);
+  assert.ok(!lines.includes(decoyAgent), 'nothing inside a bare repo may be listed');
+  assert.deepEqual(lines, [alongside.agent],
+    `only the neighbouring repo's agent worktree should appear:\n${r.stdout}`);
+});
+
 // ── the emitted function, actually run ───────────────────────────────────────
 //
 // A syntax check never caught this: with the function installed, every flag
