@@ -79,9 +79,15 @@ their sum.
 | ghq root    | `ghq root`; failing that `$GHQ_ROOT` split on `:`; failing that `~/ghq` | 45ms |
 | herdr root  | `~/.herdr/worktrees`                                                   | 0    |
 
-Roots that do not exist are dropped. Each root is resolved through `realpath`
-before the walk, and a root nested inside a root already walked is skipped, so
-overlapping configuration cannot list the same worktree twice.
+Roots that do not exist are dropped, and each one is resolved through
+`realpath` before the walk so every path built from it is spelled one way.
+
+Overlap between roots is handled at the output, with a first-writer-wins map
+keyed by path, **not** by skipping a root that sits inside another. Skipping
+looks tidier and is wrong: a `worktree.basedir` configured inside the ghq root
+would be the root skipped, and every gwq worktree would vanish from the
+listing. A root that contributes nothing new costs one wasted `readdir`, which
+is the cheaper mistake by far.
 
 `ghq root` is spawned for authority rather than reimplemented, because ghq
 supports multiple roots and reads them from three places. The `$GHQ_ROOT` and
