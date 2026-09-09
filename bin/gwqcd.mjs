@@ -2,9 +2,9 @@
 import { spawnSync, spawn } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { Buffer } from 'node:buffer';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join as joinPath } from 'node:path';
+import { join as joinPath, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // Read from package.json rather than a hand-maintained constant: `npm version`
@@ -17,7 +17,7 @@ const SCHEMA_VERSION = 1;
 const PKG = 'gwqcd';
 const SELF = fileURLToPath(import.meta.url);
 
-const HELP = `${PKG} ${VERSION} — pick a git worktree managed by gwq with fzf and cd into it.
+const HELP = `${PKG} ${VERSION} — pick a git worktree with fzf and cd into it, wherever it lives.
 
 USAGE
   ${PKG} [options] [<query>]
@@ -29,6 +29,7 @@ OPTIONS
   --query <q>        initial fzf query (same as the positional argument)
   --local            only the current repository's worktrees (default: all)
   --no-main          hide main worktrees, leaving only linked ones
+  --source <list>    comma-separated: gwq | claude | herdr | other | all (default: all)
   --list             print every candidate instead of picking one
   --json             stdout = 1-line JSON, never opens the fzf UI
   --quiet            stdout = path only (this is what the shell function uses)
@@ -37,11 +38,22 @@ OPTIONS
   -V, --version      show version
 
 EXAMPLES
-  ${PKG}                        fzf over every worktree gwq knows about
+  ${PKG}                        fzf over every worktree on the machine
   ${PKG} rate-limit             fzf pre-filtered; auto-picks a unique match
   ${PKG} --local                only this repository's worktrees
   ${PKG} --list --no-main       every linked worktree, one path per line
   ${PKG} --json rate-limit      machine-readable best match
+  ${PKG} --source gwq           a picker with no agent worktrees in it
+
+WHERE IT LOOKS
+  gwq      the directory named by \`gwq config get worktree.basedir\`
+  claude   <repo>/.claude/worktrees/… for every repository under \`ghq root\`,
+           and inside every worktree found above — what \`claude -w\` creates
+  herdr    ~/.herdr/worktrees/<repo>/…
+
+  ghq is optional: without it there is no ghq root to search, so only the gwq
+  and herdr roots are peeked for .claude/worktrees. A repository somewhere else
+  entirely, say ~/dev/project, is not searched at all.
 
 WHY --init
   A child process cannot change its parent shell's directory, so \`npx ${PKG}\`
@@ -57,9 +69,9 @@ OUTPUT
     Ctrl-C       exit 130
 
   --json mode prints 1 line of JSON to stdout:
-    {"schemaVersion":1,"path":"…","branch":"…","commit":"…","isMain":false,"matches":1}
+    {"schemaVersion":1,"path":"…","branch":"…","commit":"…","isMain":false,"source":"gwq","matches":1}
   with --list:
-    {"schemaVersion":1,"count":2,"worktrees":[{"path":"…","branch":"…","commit":"…","isMain":false}]}
+    {"schemaVersion":1,"count":2,"worktrees":[{"path":"…","branch":"…","commit":"…","isMain":false,"source":"claude"}]}
 
   On error in --json mode, stdout is empty and stderr gets:
     {"schemaVersion":1,"error":{"code":"E_NO_MATCH","message":"…"},"exitCode":2}
@@ -69,7 +81,7 @@ EXIT CODES
   1    validation / generic failure (E_VALIDATION, E_GWQ)
   2    no worktree matched (E_NO_MATCH)
   3    non-interactive and the query was ambiguous or absent (E_AMBIGUOUS)
-  127  gwq or fzf not installed (E_DEPS)
+  127  git, gwq or fzf not installed (E_DEPS)
   130  interrupted — Esc or Ctrl-C in fzf (E_INTERRUPTED)
 `;
 
@@ -102,6 +114,7 @@ try {
       query: { type: 'string' },
       local: { type: 'boolean' },
       'no-main': { type: 'boolean' },
+      source: { type: 'string' },
       list: { type: 'boolean' },
       json: { type: 'boolean' },
       quiet: { type: 'boolean' },
@@ -196,7 +209,7 @@ const fishq = (s) => `'${String(s).replaceAll('\\', '\\\\').replaceAll("'", "\\'
 // function usually shares its name with the binary, so a function-aware
 // lookup would find the function and recurse forever.
 function shellInit(shell, fnName) {
-  const desc = 'Pick a gwq worktree with fzf and cd into it';
+  const desc = 'Pick a git worktree with fzf and cd into it';
   const v = `${PKG}@${VERSION}`;
   const slug = fnName.replaceAll(/[^A-Za-z0-9_]/g, '_');
 
@@ -348,6 +361,25 @@ if (values.json && values.quiet) {
 if (values.cmd != null) {
   die('E_VALIDATION', '--cmd is only meaningful together with --init');
 }
+
+// A worktree's source is the tool whose convention put it where it is. `other`
+// is only reachable through --local: global discovery walks exactly the three
+// roots that produce the other three.
+const SOURCES = ['gwq', 'claude', 'herdr', 'other'];
+const SOURCE_LIST = `${SOURCES.join(' | ')} | all`;
+
+// null means every source, which is the default.
+let selectedSources = null;
+if (values.source != null) {
+  const requested = values.source.split(',').map((v) => v.trim()).filter(Boolean);
+  const bad = requested.filter((v) => v !== 'all' && !SOURCES.includes(v));
+  if (requested.length === 0 || bad.length) {
+    die('E_VALIDATION', bad.length
+      ? `--source: unknown ${bad.length > 1 ? 'sources' : 'source'} ${bad.join(', ')}. Valid: ${SOURCE_LIST}`
+      : `--source expects a comma-separated list of ${SOURCE_LIST}`);
+  }
+  if (!requested.includes('all')) selectedSources = new Set(requested);
+}
 if (positionals.length > 1) {
   die('E_VALIDATION', `unexpected extra arguments: ${positionals.slice(1).join(' ')}`);
 }
@@ -485,27 +517,96 @@ async function confirmYesNo(question) {
 // it, and stop descending the moment a worktree is found. Metadata comes from
 // git, and only for the entries that actually need it.
 //
-// Measured on the same 44: 12ms to walk, 231ms to resolve every branch and sha,
-// 272ms worst case against 7600ms. The interactive path needs no metadata at
-// all, so it lands in about 50ms.
+// Measured on the same 44 in August 2026: 12ms to walk, 231ms to resolve every
+// branch and sha, 272ms worst case against 7600ms.
+//
+// Re-measured 2026-09-09 with three roots and 128 worktrees: discovery 102ms,
+// a jump about 180ms, `gwq list -g --json` 43.7s. See CLAUDE.md I7c.
 //
 // The one entry this drops that gwq reported is a submodule checkout nested
 // inside a worktree — its own repository, not a worktree anyone wants to cd to.
 
-function gwqBasedir() {
-  const r = spawnSync('gwq', ['config', 'get', 'worktree.basedir'], { encoding: 'utf8' });
-  if (r.status !== 0) return '';
-  let v = (r.stdout ?? '').trim().split('\n')[0]?.trim() ?? '';
+// Async because `ghq root` runs alongside it: these two subprocesses are the
+// only slow part of discovery, and overlapping them makes the added wall-clock
+// the slower of the two rather than their sum.
+function capture(cmd, args) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch {
+      return resolve(null);
+    }
+    // Collect Buffers and decode once. `out += d` decodes every chunk on its
+    // own, so a multi-byte character split across a chunk boundary is
+    // destroyed — a branch named in Japanese is not a hypothetical here.
+    const chunks = [];
+    child.stdout.on('data', (d) => chunks.push(d));
+    child.on('error', () => resolve(null));
+    child.on('close', (code) => resolve(
+      code === 0 ? Buffer.concat(chunks).toString('utf8') : null));
+  });
+}
+
+// gwq stores the tilde literally; it expands it, so we must too.
+function expandTilde(v) {
   if (!v) return '';
-  // gwq stores the tilde literally; it expands it, so we must too.
   if (v === '~') return homedir();
-  if (v.startsWith('~/')) v = joinPath(homedir(), v.slice(2));
+  if (v.startsWith('~/')) return joinPath(homedir(), v.slice(2));
   return v;
 }
 
+async function gwqBasedir() {
+  const out = await capture('gwq', ['config', 'get', 'worktree.basedir']);
+  if (out == null) return '';
+  return expandTilde(out.trim().split('\n')[0]?.trim() ?? '');
+}
+
+// ghq is asked rather than reimplemented: it supports several roots and reads
+// them from three places. The fallbacks keep the claude source working when ghq
+// is not installed at all, and ~/ghq is ghq's own documented default rather
+// than a guess of ours.
+//
+// `root --all` is load-bearing. Plain `ghq root` prints only the *primary*
+// root, so with two `ghq.root` entries configured every agent worktree under
+// the second one was silently invisible — the exact failure class I1b exists to
+// prevent. An ghq too old for the flag exits non-zero, `capture` returns null,
+// and the fallbacks below take over.
+//
+// ghq is deliberately NOT in `ensureTool`. I1b requires git because without it
+// gwq reports zero worktrees to someone who has 44 — a wrong answer delivered
+// silently. Missing ghq is not that: it means there is no ghq tree to search,
+// so this source is empty and every other source returns what it always did.
+async function ghqRoots() {
+  const out = await capture('ghq', ['root', '--all']);
+  if (out != null && out.trim()) {
+    return out.trim().split('\n').map((l) => expandTilde(l.trim())).filter(Boolean);
+  }
+  const env = process.env.GHQ_ROOT;
+  if (env) return env.split(':').map((q) => expandTilde(q.trim())).filter(Boolean);
+  return [joinPath(homedir(), 'ghq')];
+}
+
+// herdr exposes no setting for this directory, so the convention is the
+// contract. If it ever grows one, this becomes a one-line change.
+function herdrRoot() {
+  return joinPath(homedir(), '.herdr', 'worktrees');
+}
+
 // Prune at the worktree. Descending into one means walking node_modules and
-// vendor trees, which is where gwq's own second-plus goes.
-function walkWorktrees(dir, depth = 0, out = []) {
+// vendor trees, which is where gwq's own 43 seconds go.
+//
+// `claude -w` puts its worktree *inside* the repository, at
+// .claude/worktrees/<slug> — precisely the place this walk refuses to enter. So
+// at the moment of pruning, and only then, peek at that one directory. One
+// readdir per repository, no descent, 9ms for the whole of a 44-repository ghq
+// root.
+//
+// `emitAs` is the source to label the pruned directory with, or null to peek
+// without emitting it. Null is what keeps main clones out of the results: the
+// ghq root is walked to find what is *inside* its repositories, and a main
+// clone is `ghqcd`'s job, not this tool's.
+function walkWorktrees(dir, { emitAs, peekOnly = [], depth = 0, out = [] }) {
   if (depth > 8) return out;
   let entries;
   try {
@@ -513,14 +614,114 @@ function walkWorktrees(dir, depth = 0, out = []) {
   } catch {
     return out; // unreadable or vanished mid-walk
   }
-  if (entries.some((e) => e.name === '.git')) {
-    out.push(dir);
+  const dotGit = entries.find((e) => e.name === '.git');
+  if (dotGit) {
+    // `emitAs` alone is not enough. If `worktree.basedir` is an *ancestor* of
+    // an ghq root — or the same directory — this walk reaches the main clones
+    // too, and would emit all 44 of them as gwq worktrees. `peekOnly` carries
+    // the roots whose repositories are to be looked inside but never listed,
+    // which is what holds I7c's "the main clone does not appear". Reordering
+    // the roots cannot fix it: an emitAs-null root records nothing, so it can
+    // never win the first-writer race.
+    //
+    // The test has to be "is this a main clone", not "is this under an ghq
+    // root" — a `worktree.basedir` configured *inside* the ghq root puts real
+    // gwq worktrees under it, and suppressing those is the exact loss I7c
+    // warns about.
+    //
+    // `.git` being a directory looks like the cheap discriminator and is not
+    // one. A `.git` symlinked to a git directory is neither (a Dirent is
+    // lstat), and `git init --separate-git-dir` puts a plain regular file in a
+    // *main* clone — no symlink involved, which is what dotfile managers
+    // produce. Both leaked the clone, and the payload then contradicted itself:
+    // `isMain: true` from rev-parse beside a Dirent that said otherwise.
+    //
+    // So under a peek-only root — a handful of directories, never the hot path
+    // — decide with git's own invariant instead. Only a linked worktree names a
+    // path inside `<repo>/.git/worktrees/`, which is the same test
+    // metaFromRevParse applies to `rev-parse --git-dir`, so the two can no
+    // longer disagree.
+    // `emitAs` first, and short-circuit before `isLinkedWorktree`: the only
+    // peek-only root on an ordinary machine is the ghq root, whose walk has
+    // emitAs null, so computing `suppress` eagerly read 44 `.git` files and
+    // discarded every one of them. Now the read happens only in the overlap
+    // configuration that needs it.
+    if (emitAs && !(isUnder(dir, peekOnly) && !isLinkedWorktree(dir))) {
+      out.push({ path: dir, source: emitAs });
+    }
+    collectClaudeWorktrees(dir, out);
     return out;
   }
+  // A bare repository — `ghq get --bare` makes them — has no `.git` at all, so
+  // the walk would descend its object store to the depth guard: measured at
+  // +40ms for one repo with a full 256-directory loose fanout. It can hold no
+  // worktree of its own, so stop here. The cost is three name lookups on
+  // entries already in hand.
+  if (looksBare(entries)) return out;
+
   for (const e of entries) {
-    if (e.isDirectory() && !e.isSymbolicLink()) walkWorktrees(joinPath(dir, e.name), depth + 1, out);
+    if (e.isDirectory() && !e.isSymbolicLink()) {
+      walkWorktrees(joinPath(dir, e.name), { emitAs, peekOnly, depth: depth + 1, out });
+    }
   }
   return out;
+}
+
+function looksBare(entries) {
+  let head = false;
+  let objects = false;
+  let refs = false;
+  for (const e of entries) {
+    if (e.name === 'HEAD' && e.isFile()) head = true;
+    else if (e.name === 'objects' && e.isDirectory()) objects = true;
+    else if (e.name === 'refs' && e.isDirectory()) refs = true;
+  }
+  return head && objects && refs;
+}
+
+function isUnder(path, prefixes) {
+  return prefixes.some((p) => path === p || path.startsWith(p + sep));
+}
+
+// Only a linked worktree's `.git` names a path inside `<repo>/.git/worktrees/`.
+// A directory, or a symlink to one, throws EISDIR and reads as a main clone —
+// which is what it is.
+function isLinkedWorktree(dir) {
+  let text;
+  try {
+    text = readFileSync(joinPath(dir, '.git'), 'utf8');
+  } catch {
+    return false;
+  }
+  return /[/\\]\.git[/\\]worktrees[/\\]/.test(text);
+}
+
+// .claude/worktrees can hold anything the agent left behind, so only a
+// directory with a `.git` of its own counts. Recurses because an agent can
+// start an agent, under the same depth guard as the walk.
+// `generation` counts agent-inside-agent nesting and is deliberately NOT the
+// walk's directory depth. Sharing one counter meant the budget for agent
+// generations was whatever the walk had left over, so the same ten-deep chain
+// truncated at six under the ghq root and at five inside a gwq worktree —
+// silently, and for a reason that has nothing to do with agents.
+const MAX_AGENT_GENERATIONS = 8;
+
+function collectClaudeWorktrees(repo, out, generation = 0) {
+  if (generation >= MAX_AGENT_GENERATIONS) return;
+  const base = joinPath(repo, '.claude', 'worktrees');
+  let entries;
+  try {
+    entries = readdirSync(base, { withFileTypes: true });
+  } catch {
+    return; // the common case by far: this repository has no agent worktrees
+  }
+  for (const e of entries) {
+    if (!e.isDirectory() || e.isSymbolicLink()) continue;
+    const wt = joinPath(base, e.name);
+    if (!existsSync(joinPath(wt, '.git'))) continue;
+    out.push({ path: wt, source: 'claude' });
+    collectClaudeWorktrees(wt, out, generation + 1);
+  }
 }
 
 // One git call per worktree yields all three fields at once. `--git-dir` is the
@@ -546,10 +747,11 @@ function revParse(path) {
     } catch {
       return resolve(null);
     }
-    let out = '';
-    child.stdout.on('data', (d) => { out += d; });
+    const chunks = []; // decode once; see capture() for why
+    child.stdout.on('data', (d) => chunks.push(d));
     child.on('error', () => resolve(null));
-    child.on('close', (code) => resolve(code === 0 ? out.trim().split('\n') : null));
+    child.on('close', (code) => resolve(
+      code === 0 ? Buffer.concat(chunks).toString('utf8').trim().split('\n') : null));
   });
 }
 
@@ -587,9 +789,11 @@ function localWorktrees() {
   return out;
 }
 
-// The last-resort path: if gwq will not tell us its base directory, or the
-// directory is gone, fall back to asking gwq itself. Slow but correct, and it
-// keeps exotic configurations working.
+// The last-resort path, reached only when the gwq base directory could not be
+// walked: gwq would not name it, or it is gone. 43 seconds on this machine, so
+// nothing else may route here — an empty but walkable basedir is a truthful
+// empty gwq source. Slow but correct, and it keeps exotic configurations
+// working.
 function gwqListJson(args) {
   const r = spawnSync('gwq', args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   if (r.error) die('E_GWQ', `could not run gwq: ${r.error.message}`);
@@ -616,20 +820,138 @@ function gwqListJson(args) {
     }));
 }
 
-// Returns { paths, meta } where meta is a Map that may start empty: filling it
-// costs a git call per worktree, so callers ask for only what they print.
-function discoverWorktrees() {
+// Returns { paths, sources, meta }. `sources` maps a path to the tool whose
+// convention put it there, or null when it is not known yet (--local learns it
+// lazily, in labelLocal). `meta` may start empty: filling it costs a git call
+// per worktree, so callers ask for only what they print.
+async function discoverWorktrees() {
   if (values.local) {
     const list = localWorktrees();
-    return { paths: list.map((w) => w.path), meta: new Map(list.map((w) => [w.path, w])) };
+    return {
+      paths: list.map((w) => w.path),
+      sources: new Map(list.map((w) => [w.path, null])),
+      meta: new Map(list.map((w) => [w.path, w])),
+    };
   }
-  const basedir = gwqBasedir();
-  if (basedir) {
-    const paths = walkWorktrees(basedir);
-    if (paths.length) return { paths, meta: new Map() };
+
+  const found = new Map(); // path -> source, first writer wins
+  const meta = new Map();
+
+  // The two subprocess lookups are the only slow part of discovery, so they
+  // overlap: the added wall-clock is the slower of the two, not their sum.
+  const [basedir, ghq] = await Promise.all([gwqBasedir(), ghqRoots()]);
+
+  const roots = usableRoots([
+    { dir: basedir, emitAs: 'gwq' },
+    // emitAs null: walked for the `.claude/worktrees` inside its repositories,
+    // never for the repositories themselves.
+    ...ghq.map((dir) => ({ dir, emitAs: null })),
+    { dir: herdrRoot(), emitAs: 'herdr' },
+  ]);
+  const peekOnly = roots.filter((r) => !r.emitAs).map((r) => r.dir);
+
+  for (const root of roots) {
+    for (const e of walkWorktrees(root.dir, { emitAs: root.emitAs, peekOnly })) {
+      if (!found.has(e.path)) found.set(e.path, e.source);
+    }
   }
-  const list = gwqListJson(['list', '-g', '--json']);
-  return { paths: list.map((w) => w.path), meta: new Map(list.map((w) => [w.path, w])) };
+
+  // The fallback is reached when the gwq base directory could not be walked at
+  // all — gwq would not name it, or it is gone. An empty but walkable basedir
+  // is a truthful empty gwq source and must NOT drag the 43-second path in.
+  //
+  // It *supplements* rather than replaces: an earlier cut returned only the
+  // fallback's entries, so a machine whose basedir had vanished lost nothing
+  // visibly while a herdr worktree kept the list non-empty and suppressed the
+  // fallback entirely. Both halves of that were silent wrong answers.
+  if (!roots.some((r) => r.emitAs === 'gwq')) {
+    const cls = await sourceRoots(basedir);
+    for (const w of gwqListJson(['list', '-g', '--json'])) {
+      if (found.has(w.path)) continue;
+      // `gwq list -g` walks the basedir, so a `claude -w` worktree living
+      // inside a gwq worktree is in its output too. Labelling the lot `gwq`
+      // contradicted `--help`'s promise that `--source gwq` hides agent
+      // worktrees.
+      //
+      // `gwq` is the right default here rather than `other`: these came out of
+      // `gwq list -g`, so gwq is where they live even when it would not tell us
+      // the directory. Only the labels a path can prove on its own — the
+      // `.claude/worktrees` segment, or sitting under the herdr root — override
+      // it.
+      const src = classifySource(w.path, cls);
+      found.set(w.path, src === 'other' ? 'gwq' : src);
+      meta.set(w.path, w);
+    }
+  }
+
+  return { paths: [...found.keys()], sources: found, meta };
+}
+
+// Each root is resolved through realpath so every path built from it is spelled
+// one way, and roots that do not exist are dropped. Overlap between roots is
+// handled where it actually shows up — by the first-writer-wins map above —
+// rather than by dropping a root nested inside another, which would drop a
+// worktree.basedir configured under the ghq root and lose every gwq worktree.
+function usableRoots(specs) {
+  const out = [];
+  const seen = new Set();
+  for (const { dir, emitAs } of specs) {
+    if (!dir) continue;
+    let real;
+    try {
+      real = realpathSync(dir);
+      // `realpath` succeeding is not the same as the directory being walkable,
+      // and I7d's fallback turns on exactly that distinction. A
+      // `worktree.basedir` typo'd onto a regular file realpaths fine and then
+      // throws ENOTDIR from readdir; `chmod 000` throws EACCES. Either one used
+      // to count as a usable gwq root, suppress the fallback, and lose every
+      // gwq worktree silently — the same shape as the ENOENT case, by a
+      // different errno. So prove it can be read.
+      readdirSync(real);
+    } catch {
+      continue; // absent, not a directory, or unreadable: not a root
+    }
+    // Dedup on the pair, not on the directory. `GHQ_ROOT=~/ghq:~/ghq` walks the
+    // same tree twice for nothing; but a basedir that *equals* an ghq root is
+    // two different roots at one path — one emits, one only contributes its
+    // peek-only prefix — and collapsing those would lose whichever came second.
+    const key = `${emitAs ?? ''}\u0000${real}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ dir: real, emitAs });
+  }
+  return out;
+}
+
+// The prefixes a path can be recognised by, for the two callers that have only
+// a path and no idea which walk produced it.
+async function sourceRoots(basedir) {
+  const dirs = basedir === undefined ? await gwqBasedir() : basedir;
+  const roots = [];
+  for (const [dir, source] of [[dirs, 'gwq'], [herdrRoot(), 'herdr']]) {
+    if (!dir) continue;
+    try { roots.push([realpathSync(dir), source]); } catch { /* not a root */ }
+  }
+  return roots;
+}
+
+// git reports paths, not provenance, so a --local listing has to recognise the
+// roots by shape. The .claude test and the herdr root are free; the gwq label
+// is the one that costs a subprocess, which is why the caller gates this.
+async function labelLocal(paths, into) {
+  const roots = await sourceRoots(undefined);
+  for (const p of paths) into.set(p, classifySource(p, roots));
+}
+
+// A `claude -w` worktree inside a gwq worktree is under the gwq base directory
+// *and* has .claude/worktrees in its path, so the claude test has to come
+// first: the innermost convention is the one that made the directory.
+function classifySource(path, roots) {
+  if (path.includes(`${sep}.claude${sep}worktrees${sep}`)) return 'claude';
+  for (const [dir, source] of roots) {
+    if (path === dir || path.startsWith(dir + sep)) return source;
+  }
+  return 'other';
 }
 
 // ── fzf ──────────────────────────────────────────────────────────────────────
@@ -771,9 +1093,24 @@ async function main() {
   await ensureTool('gwq');
   await ensureTool('fzf');
 
-  const found = discoverWorktrees();
+  const found = await discoverWorktrees();
   const byPath = found.meta;
+  const sourceOf = found.sources;
   let paths = found.paths;
+
+  // Global discovery knows the source by construction. --local gets its paths
+  // from git, which has no notion of one, so the label is derived from the path
+  // against the known roots — and only when something is going to read it,
+  // because the gwq label costs a subprocess.
+  if (values.local && (isJson || selectedSources)) await labelLocal(paths, sourceOf);
+
+  if (selectedSources) {
+    const before = paths.length;
+    paths = paths.filter((p) => selectedSources.has(sourceOf.get(p) ?? 'other'));
+    if (paths.length === 0 && before > 0) {
+      die('E_NO_MATCH', `no worktree came from ${[...selectedSources].join(' or ')}`);
+    }
+  }
 
   // Only --no-main needs every entry's metadata up front; everything else
   // resolves the one it prints.
@@ -785,14 +1122,22 @@ async function main() {
   if (paths.length === 0) {
     die('E_NO_MATCH', values.local
       ? 'this repository has no worktrees. Create one with `gwq add <branch>`.'
-      : 'gwq knows about no worktrees. Create one with `gwq add <branch>`.');
+      : "no worktrees found under gwq's base directory, ~/.herdr/worktrees, or "
+        + 'any .claude/worktrees below the ghq root. Create one with `gwq add <branch>`.');
   }
 
   // fzf matches on the path, exactly as the original shell function did — the
   // path already encodes host, owner, repo and a branch slug.
-  const shape = (w) => ({
-    path: w.path, branch: w.branch, commit: w.commit, isMain: w.isMain,
-  });
+  const shape = (p) => {
+    const m = byPath.get(p) ?? { path: p, branch: '', commit: '', isMain: false };
+    return {
+      path: m.path,
+      branch: m.branch,
+      commit: m.commit,
+      isMain: m.isMain,
+      source: sourceOf.get(p) ?? 'other',
+    };
+  };
 
   // ── --list ────────────────────────────────────────────────────────────────
   if (values.list) {
@@ -803,7 +1148,7 @@ async function main() {
       process.stdout.write(JSON.stringify({
         schemaVersion: SCHEMA_VERSION,
         count: shown.length,
-        worktrees: shown.map((p) => shape(byPath.get(p))),
+        worktrees: shown.map((p) => shape(p)),
       }) + '\n');
     } else {
       process.stdout.write(shown.join('\n') + '\n');
@@ -839,7 +1184,7 @@ async function main() {
   if (isJson) {
     process.stdout.write(JSON.stringify({
       schemaVersion: SCHEMA_VERSION,
-      ...shape(picked),
+      ...shape(selected),
       matches,
     }) + '\n');
     return;

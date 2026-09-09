@@ -1,13 +1,16 @@
 # gwqcd
 
-Pick a git worktree managed by [gwq](https://github.com/d-kuro/gwq) with [fzf](https://github.com/junegunn/fzf) and `cd` into it.
+Pick a git worktree with [fzf](https://github.com/junegunn/fzf) and `cd` into it — the ones
+[gwq](https://github.com/d-kuro/gwq) makes, the ones `claude -w` makes, and the ones
+[herdr](https://herdr.dev) makes.
 
 ```console
 $ gwqcd
   worktree>
   ▌ /Users/you/worktrees/github.com/you/api/feat-login
     /Users/you/worktrees/github.com/you/api/fix-cache
-    /Users/you/worktrees/github.com/you/web/main
+    /Users/you/ghq/github.com/you/api/.claude/worktrees/drifting-giggling-pond
+    /Users/you/.herdr/worktrees/api/worktree-brave-meadow-2b28
   ╭───────────────────────────────────────╮
   │ 8f2c1a9 Add the login form            │
   │ 3b7d004 Wire up the session store     │
@@ -55,16 +58,47 @@ it keeps working after npm garbage-collects the npx cache. It is still worth a
 global install: `npx` adds about a second to every jump.
 
 Requires `git`, `gwq` and `fzf` on `PATH` (`brew install git fzf d-kuro/tap/gwq`),
-and Node >= 20.12. **No `jq`.**
+and Node >= 20.12. **No `jq`.** `ghq` is optional — see below.
+
+## Where it looks
+
+| source | location | created by |
+| --- | --- | --- |
+| `gwq` | `gwq config get worktree.basedir` | `gwq add` |
+| `claude` | `<repo>/.claude/worktrees/<slug>` | `claude -w` |
+| `herdr` | `~/.herdr/worktrees/<repo>/<slug>` | `herdr worktree create` |
+| `other` | anywhere else | only ever seen with `--local` |
+
+`--source` takes a comma-separated list, so `--source claude,herdr` is every
+agent worktree and nothing else.
+
+`claude -w` puts its worktree *inside* the repository it belongs to, so `gwqcd`
+looks inside every repository under `ghq root` — and inside every worktree it
+already found, because an agent can start an agent. It never descends into a
+repository past that one directory, which is what keeps the three walks at
+about 42ms across 44 repositories and 129 worktrees.
+
+`ghq` is optional. Without it there is no ghq root to search, so agent
+worktrees are still found inside anything under the gwq base directory or the
+herdr root — just not inside your main clones. A repository somewhere else
+entirely, say `~/dev/project`, is not searched at all.
+
+`--source gwq` gives you a picker with no agent worktrees in it.
 
 ### Speed
 
 `gwq list -g` shells out to git for every entry it finds under the base
-directory, including files inside worktrees: 7.6 seconds on 44 worktrees here.
-`gwqcd` implements gwq's rule — "all worktrees in the configured base
-directory" — by walking that directory and stopping at each worktree, then asks
-git for branch and commit only for the entries it is about to print. Same
-answers, about 50ms for a jump.
+directory, including files inside worktrees: **43.7 seconds** on 115 worktrees
+here, up from 7.6 seconds when that was last measured in August as worktrees
+accumulated. `gwqcd` walks its three roots instead and stops at each worktree,
+then asks git for branch and commit only for the entries it is about to print.
+Same answers, about **150ms** for a jump — roughly 94ms of discovery, 38ms of
+checking that git, gwq and fzf exist, and 33ms of node starting up.
+
+`--list --json` is the expensive mode, near 640ms, because it pays one
+`git rev-parse` per worktree (sixteen at a time) to fill in every branch and
+commit. Interactive picking resolves metadata only for the one worktree it
+prints.
 
 ## Why `--init` exists
 
@@ -100,6 +134,7 @@ gwqcd [options] [<query>]
 | `--query <q>` | initial fzf query (same as the positional) |
 | `--local` | only the current repository's worktrees (default: all) |
 | `--no-main` | hide main worktrees, leaving only linked ones |
+| `--source <list>` | comma-separated `gwq` \| `claude` \| `herdr` \| `other` \| `all` (default: `all`) |
 | `--list` | print every candidate instead of picking one |
 | `--json` | stdout = 1-line JSON, never opens the fzf UI |
 | `--quiet` | stdout = path only |
@@ -116,14 +151,20 @@ usually lands without a keystroke.
 
 ```console
 $ gwqcd --json login
-{"schemaVersion":1,"path":"/Users/you/worktrees/github.com/you/api/feat-login","branch":"feat/login","commit":"8f2c1a9…","isMain":false,"matches":1}
+{"schemaVersion":1,"path":"/Users/you/worktrees/github.com/you/api/feat-login","branch":"feat/login","commit":"8f2c1a9…","isMain":false,"source":"gwq","matches":1}
 
 $ gwqcd --list --json --no-main
-{"schemaVersion":1,"count":2,"worktrees":[{"path":"…","branch":"…","commit":"…","isMain":false}]}
+{"schemaVersion":1,"count":2,"worktrees":[{"path":"…","branch":"…","commit":"…","isMain":false,"source":"claude"}]}
 ```
 
 `branch` is the real ref name, which the directory slug does not always carry —
-`feat/login` lives in a directory called `feat-login`.
+`feat/login` lives in a directory called `feat-login`, and `claude -w` named a
+directory `drifting-giggling-pond` for a branch called
+`fix/editor-chat-domain-guide`.
+
+`source` names the tool whose convention created the worktree. A `claude` or
+`herdr` worktree was handed to another agent session, so `--source gwq` is the
+safer request when you need somewhere to work.
 
 `matches` tells you whether the query was unique — `> 1` means the best-scoring
 candidate was returned but the query was ambiguous.
@@ -141,7 +182,7 @@ $ gwqcd --json nope
 | 1 | `E_VALIDATION`, `E_GWQ`, `E_FZF` | bad flags, or an upstream command failed |
 | 2 | `E_NO_MATCH` | no worktrees, or the query matched none |
 | 3 | `E_AMBIGUOUS` | non-interactive with no query — pass one, or use `--list` |
-| 127 | `E_DEPS` | `gwq` or `fzf` not installed |
+| 127 | `E_DEPS` | `git`, `gwq` or `fzf` not installed |
 | 130 | `E_INTERRUPTED` | Esc or Ctrl-C in fzf |
 
 Cancelling the picker exits 130 silently — no error line lands above your next

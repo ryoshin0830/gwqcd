@@ -4,12 +4,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, chmodSync, rmSync, mkdirSync, realpathSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, chmodSync, rmSync, mkdirSync, realpathSync, readFileSync, symlinkSync, existsSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const BIN = join(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'gwqcd.mjs');
+const PKG_VERSION = JSON.parse(
+  readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'),
+).version;
 
 const WORKTREES = [
   { path: '/wt/github.com/alice/api/main', branch: 'main', commit_hash: 'aaa1111', is_main: true },
@@ -51,16 +54,36 @@ exit 2
   return dir;
 }
 
-function run(args, { shims, cwd } = {}) {
+// Hermetic against the developer's own machine, which the ghq root made a live
+// problem: PATH is the shim directory plus the system directories git lives in
+// and nothing else, so a real gwq, ghq or fzf cannot answer a question a shim
+// was written for. HOME is a fresh empty directory for the same reason — the
+// herdr root and the `~/ghq` fallback have to land somewhere the test controls,
+// or the suite starts reporting the developer's own 44 repositories. GHQ_ROOT
+// goes for the same reason as FORCE_COLOR: it is theirs, not ours.
+function run(args, { shims, cwd, env } = {}) {
   const dir = shims ?? makeShims();
-  const childEnv = { ...process.env, PATH: `${dir}:${process.env.PATH}`, NO_COLOR: '1' };
+  const ownHome = env?.HOME ? null : mkdtempSync(join(tmpdir(), 'gwqcd-nohome-'));
+  const childEnv = { ...process.env };
   // We force NO_COLOR; node itself warns to stderr when FORCE_COLOR is also
   // set, so a developer who exports it would otherwise see phantom failures.
+  // GHQ_ROOT goes for the same reason: it is theirs, not ours.
+  //
+  // Both are dropped *before* the caller's own env is applied, so a test that
+  // deliberately sets GHQ_ROOT — the fallback branch has to be exercised
+  // somehow — still gets it, while an exported one can never leak in.
   delete childEnv.FORCE_COLOR;
+  delete childEnv.GHQ_ROOT;
+  Object.assign(childEnv, {
+    PATH: `${dir}:/usr/bin:/bin`,
+    HOME: env?.HOME ?? ownHome,
+    NO_COLOR: '1',
+  }, env);
   const r = spawnSync(process.execPath, [BIN, ...args], {
     encoding: 'utf8', env: childEnv, ...(cwd ? { cwd } : {}),
   });
   if (!shims) rmSync(dir, { recursive: true, force: true });
+  if (ownHome) rmSync(ownHome, { recursive: true, force: true });
   return r;
 }
 
@@ -179,6 +202,7 @@ test('--list --json carries branch, commit and isMain', () => {
     branch: 'feat/login',
     commit: 'bbb2222',
     isMain: false,
+    source: 'gwq',
   });
 });
 
@@ -265,6 +289,10 @@ test('malformed JSON from gwq is reported, not silently swallowed', () => {
 
 // ── dependency check ─────────────────────────────────────────────────────────
 
+// These two build their own PATH and inherit the rest of the environment
+// rather than going through run(), because the whole point is a PATH with a
+// tool missing from it. Safe: ensureTool runs before anything reads HOME or a
+// gwq/ghq config, so the developer's machine cannot change the outcome.
 test('a missing fzf exits 127 with the brew command', () => {
   const dir = mkdtempSync(join(tmpdir(), 'gwqcd-noshim-'));
   // git too: it is checked before gwq, so omitting it would make this
@@ -303,110 +331,861 @@ test('a missing git exits 127 — gwq shells out to it', () => {
 
 // ── the fast discovery path ──────────────────────────────────────────────────
 //
-// `gwq list -g` took 7.6 seconds on 44 worktrees; walking gwq's base directory
-// takes 12ms. These tests use a real basedir with real worktrees, because the
-// walk, the pruning and the metadata all come from the filesystem and git.
+// `gwq list -g` took 43.7 seconds on this machine's 115 worktrees; walking the
+// roots takes 30ms. These tests build a real home with real repositories,
+// because the walk, the pruning, the .claude peek and the metadata all come
+// from the filesystem and from git — a shim cannot express any of it.
+//
+// Layout, and what must come out of it:
+//
+//   $HOME/ghq/host/owner/repo                     main clone  — NOT listed
+//     .claude/worktrees/drifting-giggling-pond    claude      — listed
+//       .claude/worktrees/quizzical-jumping-tome  claude      — listed (nested)
+//     .claude/worktrees/agent-aed5fc34            claude      — listed, detached
+//     .claude/worktrees/notes                     no .git     — NOT listed
+//   $HOME/worktrees/host/owner/repo/feat-one      gwq         — listed
+//     .claude/worktrees/season-amazing-net        claude      — listed
+//     vendor/dep                                  nested repo — NOT listed
+//   $HOME/.herdr/worktrees/repo/worktree-brave-meadow-2b28
+//                                                 herdr       — listed
 
-function realBasedir() {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'gwqcd-base-')));
-  const repo = join(root, 'repo');
-  const base = join(root, 'worktrees');
-  mkdirSync(repo); mkdirSync(base);
+function buildHome() {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'gwqcd-home-')));
+  const ghqRoot = join(home, 'ghq');
+  const base = join(home, 'worktrees');
+  const repo = join(ghqRoot, 'host', 'owner', 'repo');
+  // The CLI under test gets the fixture's HOME, but this builder was still
+  // running git with the developer's real one — so a global core.hooksPath or
+  // commit.gpgsign broke twenty tests and leaked their fixtures. Scrub the
+  // config cascade the same way run() scrubs the environment.
+  const gitEnv = {
+    ...process.env,
+    HOME: home,
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_TERMINAL_PROMPT: '0',
+  };
   const g = (cwd, ...a) => {
-    const r = spawnSync('git', a, { cwd, encoding: 'utf8' });
+    const r = spawnSync('git', a, { cwd, encoding: 'utf8', env: gitEnv });
     if (r.status !== 0) throw new Error(`git ${a.join(' ')}: ${r.stderr}`);
     return (r.stdout ?? '').trim();
   };
+
+  mkdirSync(repo, { recursive: true });
+  mkdirSync(base, { recursive: true });
   g(repo, 'init', '-q', '-b', 'main');
   g(repo, 'config', 'user.email', 't@e.com');
   g(repo, 'config', 'user.name', 'T');
   writeFileSync(join(repo, 'a.txt'), 'x\n');
-  g(repo, 'add', '-A'); g(repo, 'commit', '-qm', 'init');
-  // Two linked worktrees under the basedir, one nested in a subdirectory the
-  // way gwq's template produces.
-  mkdirSync(join(base, 'host', 'owner', 'repo'), { recursive: true });
-  g(repo, 'worktree', 'add', '-q', '-b', 'feat/one', join(base, 'host', 'owner', 'repo', 'feat-one'));
-  g(repo, 'worktree', 'add', '-q', '-b', 'feat/two', join(base, 'host', 'owner', 'repo', 'feat-two'));
-  // A decoy that must not be walked into: files inside a worktree, including a
-  // nested repository of its own. gwq reports these; they are not worktrees.
-  const nested = join(base, 'host', 'owner', 'repo', 'feat-one', 'vendor', 'dep');
+  g(repo, 'add', '-A');
+  g(repo, 'commit', '-qm', 'init');
+
+  // gwq's layout: nested under host/owner/repo the way its template produces.
+  const wtDir = join(base, 'host', 'owner', 'repo');
+  mkdirSync(wtDir, { recursive: true });
+  const gwqOne = join(wtDir, 'feat-one');
+  g(repo, 'worktree', 'add', '-q', '-b', 'feat/one', gwqOne);
+
+  // The decoy that must not be walked into: files inside a worktree, including
+  // a repository of its own. gwq reports these; they are not worktrees.
+  const nested = join(gwqOne, 'vendor', 'dep');
   mkdirSync(nested, { recursive: true });
   g(nested, 'init', '-q', '-b', 'main');
-  return { root, repo, base, sha: g(repo, 'rev-parse', 'HEAD') };
+
+  // `claude -w` inside a gwq worktree — the peek has to happen at every root,
+  // not only under ghq.
+  mkdirSync(join(gwqOne, '.claude', 'worktrees'), { recursive: true });
+  g(repo, 'worktree', 'add', '-q', '-b', 'season-amazing-net',
+    join(gwqOne, '.claude', 'worktrees', 'season-amazing-net'));
+
+  // `claude -w` inside the main clone, which is where it normally lands.
+  const cw = join(repo, '.claude', 'worktrees');
+  mkdirSync(cw, { recursive: true });
+  // The I8 case, verified against a real one: the directory says
+  // drifting-giggling-pond and the branch says fix/editor-chat-domain-guide.
+  g(repo, 'worktree', 'add', '-q', '-b', 'fix/editor-chat-domain-guide',
+    join(cw, 'drifting-giggling-pond'));
+  // A real `agent-…` worktree observed on a detached HEAD, so branch is ''.
+  g(repo, 'worktree', 'add', '-q', '--detach', join(cw, 'agent-aed5fc34'));
+  // Junk in .claude/worktrees is not a worktree.
+  mkdirSync(join(cw, 'notes'), { recursive: true });
+  writeFileSync(join(cw, 'notes', 'scratch.md'), '# not a worktree\n');
+  // An agent can start an agent.
+  mkdirSync(join(cw, 'drifting-giggling-pond', '.claude', 'worktrees'), { recursive: true });
+  g(repo, 'worktree', 'add', '-q', '-b', 'sub/agent',
+    join(cw, 'drifting-giggling-pond', '.claude', 'worktrees', 'quizzical-jumping-tome'));
+
+  // herdr: ~/.herdr/worktrees/<repo>/<slug>. The slug flattens the slash, so
+  // this is the I8 case again on a second tool.
+  const herdr = join(home, '.herdr', 'worktrees', 'repo');
+  mkdirSync(herdr, { recursive: true });
+  g(repo, 'worktree', 'add', '-q', '-b', 'worktree/brave-meadow-2b28',
+    join(herdr, 'worktree-brave-meadow-2b28'));
+
+  return { home, ghqRoot, base, repo };
 }
 
-// A gwq that only answers `config get worktree.basedir`; anything else would be
-// the slow path, and reaching it here is a failure.
-function basedirShim(base) {
-  const dir = mkdtempSync(join(tmpdir(), 'gwqcd-bshim-'));
-  const p = join(dir, 'gwq');
-  writeFileSync(p, `#!/bin/sh
+// Twenty tests read this fixture and none of them writes to it, so build it
+// once. Rebuilding an identical tree twenty times cost 16 seconds of a 62
+// second suite — measured both ways in an isolated checkout — for isolation
+// none of them uses. The tests that do mutate a repository build their own
+// with repoAt().
+let sharedHome = null;
+function realHome() {
+  if (!sharedHome) {
+    sharedHome = buildHome();
+    process.on('exit', () => {
+      try { rmSync(sharedHome.home, { recursive: true, force: true }); } catch { /* gone */ }
+    });
+  }
+  return sharedHome;
+}
+
+// A gwq that answers only `config get worktree.basedir`, and an ghq that
+// answers only `root`. Anything else is the slow path, and reaching it here is
+// the failure these tests exist to catch.
+function homeShim({ base, ghqRoot, withGhq = true } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'gwqcd-hshim-'));
+  const write = (name, body) => {
+    writeFileSync(join(dir, name), body);
+    chmodSync(join(dir, name), 0o755);
+  };
+  write('gwq', `#!/bin/sh
 [ "$1" = "--version" ] && { echo "gwq version v0.1.1"; exit 0; }
 if [ "$1" = "config" ] && [ "$2" = "get" ]; then echo "${base}"; exit 0; fi
 echo "gwq: slow path taken" >&2
 exit 9
 `);
-  chmodSync(p, 0o755);
-  const fzf = join(dir, 'fzf');
-  writeFileSync(fzf, `#!/bin/sh
+  if (withGhq) {
+    write('ghq', `#!/bin/sh
+[ "$1" = "--version" ] && { echo "ghq version 1.6.2"; exit 0; }
+[ "$1" = "root" ] && { echo "${ghqRoot}"; exit 0; }
+exit 9
+`);
+  }
+  write('fzf', `#!/bin/sh
 [ "$1" = "--version" ] && { echo 0.74.1; exit 0; }
 if [ "$1" = "--filter" ]; then out=$(grep -F -- "$2"); [ -n "$out" ] || exit 1; printf '%s\\n' "$out"; exit 0; fi
 exit 2
 `);
-  chmodSync(fzf, 0o755);
   return dir;
 }
 
-test('worktrees are discovered by walking the base directory', () => {
-  const fx = realBasedir();
-  const shims = basedirShim(fx.base);
-  const r = run(['--list'], { shims });
-  rmSync(shims, { recursive: true, force: true });
-  rmSync(fx.root, { recursive: true, force: true });
+// Runs the CLI against a fixture home: HOME is redirected so the herdr root and
+// every tilde expansion land inside the fixture, and run() keeps the real
+// gwq/ghq/fzf off PATH so only the shims answer.
+function runIn(fx, args, { withGhq = true } = {}) {
+  const shims = homeShim({ base: fx.base, ghqRoot: fx.ghqRoot, withGhq });
+  try {
+    return run(args, { shims, env: { HOME: fx.home } });
+  } finally {
+    rmSync(shims, { recursive: true, force: true });
+  }
+}
+
+// Every path the fixture must yield, relative to $HOME, with its source.
+const EXPECTED = [
+  ['worktrees/host/owner/repo/feat-one', 'gwq'],
+  ['worktrees/host/owner/repo/feat-one/.claude/worktrees/season-amazing-net', 'claude'],
+  ['ghq/host/owner/repo/.claude/worktrees/agent-aed5fc34', 'claude'],
+  ['ghq/host/owner/repo/.claude/worktrees/drifting-giggling-pond', 'claude'],
+  ['ghq/host/owner/repo/.claude/worktrees/drifting-giggling-pond/.claude/worktrees/quizzical-jumping-tome', 'claude'],
+  ['.herdr/worktrees/repo/worktree-brave-meadow-2b28', 'herdr'],
+];
+
+test('a `claude -w` worktree inside a gwq worktree is found', (t) => {
+  const fx = realHome();
+  const r = runIn(fx, ['--list']);
   assert.equal(r.status, 0, r.stderr);
-  const paths = r.stdout.trim().split('\n').sort();
-  assert.equal(paths.length, 2, 'exactly the two linked worktrees');
-  assert.ok(paths[0].endsWith('feat-one'));
-  assert.ok(paths[1].endsWith('feat-two'));
+  assert.ok(
+    r.stdout.includes(join(fx.base, 'host/owner/repo/feat-one/.claude/worktrees/season-amazing-net')),
+    r.stdout,
+  );
   assert.doesNotMatch(r.stderr, /slow path/, 'gwq list must not be called');
 });
 
-test('the walk prunes at a worktree, so nested repositories are not listed', () => {
-  // Descending into a worktree is what cost gwq its second-plus, and a vendored
+test('the walk still prunes, so nested repositories are not listed', (t) => {
+  // Descending into a worktree is what cost gwq its 43 seconds, and a vendored
   // submodule is not somewhere anyone wants to cd.
-  const fx = realBasedir();
-  const shims = basedirShim(fx.base);
-  const r = run(['--list'], { shims });
-  rmSync(shims, { recursive: true, force: true });
-  rmSync(fx.root, { recursive: true, force: true });
+  const fx = realHome();
+  const r = runIn(fx, ['--list']);
   assert.doesNotMatch(r.stdout, /vendor\/dep/);
 });
 
-test('branch, commit and isMain come back correct — not the branch twice', () => {
+test('junk in .claude/worktrees without a .git is not a worktree', (t) => {
+  const fx = realHome();
+  const r = runIn(fx, ['--list']);
+  assert.doesNotMatch(r.stdout, /worktrees\/notes/);
+});
+
+test('the gwq worktree and its branch still come back correct', (t) => {
   // `git rev-parse --abbrev-ref HEAD HEAD` abbreviates *both* revs, so the
   // first version of this shipped the branch name in the commit field.
-  const fx = realBasedir();
-  const shims = basedirShim(fx.base);
-  const r = run(['--list', '--json'], { shims });
-  rmSync(shims, { recursive: true, force: true });
-  rmSync(fx.root, { recursive: true, force: true });
+  const fx = realHome();
+  const r = runIn(fx, ['--list', '--json']);
   const out = JSON.parse(r.stdout);
-  assert.equal(out.count, 2);
   const one = out.worktrees.find((w) => w.path.endsWith('feat-one'));
   assert.equal(one.branch, 'feat/one');
   assert.match(one.commit, /^[0-9a-f]{40}$/, 'a sha, not the branch name');
-  assert.equal(one.commit, fx.sha);
   assert.equal(one.isMain, false, 'a linked worktree is not the main one');
 });
 
 test('an unreadable or absent basedir falls back to gwq rather than failing', () => {
-  const shims = basedirShim('/nonexistent/gwq/basedir');
-  const r = run(['--json', 'x'], { shims });
+  const shims = homeShim({ base: '/nonexistent/gwq/basedir', ghqRoot: '/nonexistent/ghq' });
+  const empty = mkdtempSync(join(tmpdir(), 'gwqcd-emptyhome-'));
+  const r = run(['--json', 'x'], { shims, env: { HOME: empty } });
   rmSync(shims, { recursive: true, force: true });
+  rmSync(empty, { recursive: true, force: true });
   // The shim's `list` exits 9, which is the fallback being reached — the point
   // is that it is reached at all rather than reporting an empty list.
   assert.equal(jsonLine(r.stderr).error.code, 'E_GWQ');
 });
+
+test('`claude -w` worktrees inside a main clone are found', (t) => {
+  const fx = realHome();
+  const r = runIn(fx, ['--list']);
+  const out = r.stdout;
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(out.includes(join(fx.repo, '.claude/worktrees/drifting-giggling-pond')), out);
+  assert.ok(out.includes(join(fx.repo, '.claude/worktrees/agent-aed5fc34')), out);
+});
+
+test('main clones under the ghq root are NOT listed', (t) => {
+  // Walking ~/ghq for what is inside its repositories must not turn gwqcd into
+  // a worse ghqcd. The main clone is ghqcd's job.
+  const fx = realHome();
+  const r = runIn(fx, ['--list']);
+  const lines = r.stdout.trim().split('\n');
+  assert.ok(!lines.includes(fx.repo), `the main clone leaked into the list:\n${r.stdout}`);
+});
+
+test('an agent that started an agent is found', (t) => {
+  // The recursion lives in collectClaudeWorktrees, but the nested worktree in
+  // the fixture sits under the ghq root, so it is only reachable once that root
+  // is walked.
+  const fx = realHome();
+  const r = runIn(fx, ['--list']);
+  assert.ok(r.stdout.includes('quizzical-jumping-tome'), r.stdout);
+});
+
+test('a detached `agent-…` worktree reports no branch, not a crash', (t) => {
+  const fx = realHome();
+  const r = runIn(fx, ['--list', '--json']);
+  const out = JSON.parse(r.stdout);
+  const agent = out.worktrees.find((w) => w.path.endsWith('agent-aed5fc34'));
+  assert.equal(agent.branch, '', 'a detached HEAD has no branch');
+  assert.match(agent.commit, /^[0-9a-f]{40}$/);
+});
+
+test('without the ghq binary the ~/ghq fallback still finds agent worktrees', (t) => {
+  // `ghq root` is asked first, but its absence is not the end of it: $GHQ_ROOT,
+  // then ghq's own documented default of ~/ghq. The fixture home has one.
+  const fx = realHome();
+  const r = runIn(fx, ['--list'], { withGhq: false });
+  const out = r.stdout;
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(out.includes(join(fx.repo, '.claude/worktrees/drifting-giggling-pond')), out);
+});
+
+test('no ghq at all leaves the gwq source untouched and does not exit 127', (t) => {
+  // ghq is optional, unlike git (I1b): no binary and no ~/ghq means there is no
+  // tree to search, which is today's correct behavior — not exit 127.
+  const fx = realHome();
+  const bare = mkdtempSync(join(tmpdir(), 'gwqcd-noghq-'));
+  const shims = homeShim({ base: fx.base, ghqRoot: fx.ghqRoot, withGhq: false });
+  const r = run(['--list'], { shims, env: { HOME: bare } });
+  rmSync(shims, { recursive: true, force: true });
+  rmSync(bare, { recursive: true, force: true });
+  const out = r.stdout;
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(out.includes(join(fx.base, 'host/owner/repo/feat-one')), out);
+  assert.doesNotMatch(out, /ghq\/host\/owner\/repo\/\.claude/, 'no ghq root to search');
+});
+
+test('herdr worktrees are found under ~/.herdr/worktrees', (t) => {
+  const fx = realHome();
+  const r = runIn(fx, ['--list']);
+  const out = r.stdout;
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(out.includes(join(fx.home, '.herdr/worktrees/repo/worktree-brave-meadow-2b28')), out);
+});
+
+test("herdr's directory slug is not its branch name", (t) => {
+  // Directory worktree-brave-meadow-2b28, branch worktree/brave-meadow-2b28.
+  // The slash is flattened to a dash, which is I8 re-run on a second tool.
+  const fx = realHome();
+  const r = runIn(fx, ['--list', '--json']);
+  const out = JSON.parse(r.stdout);
+  const w = out.worktrees.find((x) => x.path.includes('.herdr'));
+  assert.equal(w.branch, 'worktree/brave-meadow-2b28');
+});
+
+test('the three roots together yield exactly the expected set', (t) => {
+  const fx = realHome();
+  const r = runIn(fx, ['--list']);
+  const got = r.stdout.trim().split('\n').sort();
+  const want = EXPECTED.map(([rel]) => join(fx.home, rel)).sort();
+  assert.deepEqual(got, want);
+});
+
+test('--list --json carries the source of every worktree', (t) => {
+  const fx = realHome();
+  const r = runIn(fx, ['--list', '--json']);
+  const out = JSON.parse(r.stdout);
+  const got = out.worktrees
+    .map((w) => [w.path.slice(fx.home.length + 1), w.source])
+    .sort((a, b) => a[0].localeCompare(b[0]));
+  assert.deepEqual(got, [...EXPECTED].sort((a, b) => a[0].localeCompare(b[0])));
+});
+
+test('--source gwq excludes the agent worktrees', (t) => {
+  const fx = realHome();
+  const r = runIn(fx, ['--list', '--source', 'gwq']);
+  const lines = r.stdout.trim().split('\n');
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(lines, [join(fx.base, 'host/owner/repo/feat-one')]);
+});
+
+test('--source takes a comma-separated list', (t) => {
+  const fx = realHome();
+  const r = runIn(fx, ['--list', '--source', 'claude,herdr']);
+  const lines = r.stdout.trim().split('\n').sort();
+  const want = EXPECTED.filter(([, s]) => s !== 'gwq')
+    .map(([rel]) => join(fx.home, rel)).sort();
+  assert.deepEqual(lines, want);
+});
+
+test('--source all is the default and selects everything', (t) => {
+  const fx = realHome();
+  const a = runIn(fx, ['--list']);
+  const b = runIn(fx, ['--list', '--source', 'all']);
+  // Sorted: this is the one assertion in the file that would otherwise depend
+  // on readdir order matching between two separate runs.
+  assert.deepEqual(a.stdout.trim().split('\n').sort(), b.stdout.trim().split('\n').sort());
+});
+
+test('an unknown --source value is E_VALIDATION and names the valid ones', () => {
+  const r = run(['--json', '--source', 'jujutsu']);
+  assert.equal(r.status, 1);
+  const e = jsonLine(r.stderr).error;
+  assert.equal(e.code, 'E_VALIDATION');
+  assert.match(e.message, /jujutsu/);
+  assert.match(e.message, /gwq \| claude \| herdr \| other \| all/);
+});
+
+test('--source with a query that filters everything out is E_NO_MATCH', (t) => {
+  const fx = realHome();
+  const r = runIn(fx, ['--json', '--source', 'herdr', 'feat-one']);
+  assert.equal(r.status, 2);
+  assert.equal(jsonLine(r.stderr).error.code, 'E_NO_MATCH');
+});
+
+test('--local labels the sources it can see', (t) => {
+  // git reports every worktree of the repository, agent ones included, and has
+  // always done so. Now the listing says which is which.
+  const fx = realHome();
+  const shims = homeShim({ base: fx.base, ghqRoot: fx.ghqRoot });
+  t.after(() => rmSync(shims, { recursive: true, force: true }));
+  const r = run(['--local', '--list', '--json'], {
+    shims, cwd: fx.repo, env: { HOME: fx.home },
+  });
+  const out = JSON.parse(r.stdout);
+  const bySource = {};
+  for (const w of out.worktrees) bySource[w.source] = (bySource[w.source] ?? 0) + 1;
+  // the main clone is `other`; the gwq worktree is `gwq`; the herdr one is
+  // `herdr`; the four .claude ones are `claude`.
+  assert.equal(bySource.other, 1, JSON.stringify(out.worktrees, null, 2));
+  assert.equal(bySource.gwq, 1);
+  assert.equal(bySource.herdr, 1);
+  assert.equal(bySource.claude, 4);
+});
+
+test('--local --source other is the main clone alone', (t) => {
+  const fx = realHome();
+  const shims = homeShim({ base: fx.base, ghqRoot: fx.ghqRoot });
+  t.after(() => rmSync(shims, { recursive: true, force: true }));
+  const r = run(['--local', '--list', '--source', 'other'], {
+    shims, cwd: fx.repo, env: { HOME: fx.home },
+  });
+  const lines = r.stdout.trim().split('\n');
+  assert.deepEqual(lines, [fx.repo]);
+});
+
+// ── overlapping roots, and more than one ghq root ────────────────────────────
+//
+// I7c makes three claims about root geometry that the sibling-root fixture
+// above cannot exercise, because its three roots never overlap. All three were
+// found by review, two of them as live bugs.
+
+// A shim whose `gwq config get` and `ghq root --all` answers are chosen per
+// test, so root geometry is the thing under test.
+function geometryShim({ basedir, ghqRoots }) {
+  const dir = mkdtempSync(join(tmpdir(), 'gwqcd-geo-'));
+  const write = (name, body) => {
+    writeFileSync(join(dir, name), body);
+    chmodSync(join(dir, name), 0o755);
+  };
+  write('gwq', `#!/bin/sh
+[ "$1" = "--version" ] && { echo "gwq version v0.1.1"; exit 0; }
+if [ "$1" = "config" ] && [ "$2" = "get" ]; then echo "${basedir}"; exit 0; fi
+echo "gwq: slow path taken" >&2
+exit 9
+`);
+  // Only --all lists every root; plain `ghq root` gives the primary one. That
+  // asymmetry is the bug this shim reproduces.
+  write('ghq', `#!/bin/sh
+[ "$1" = "--version" ] && { echo "ghq version 1.10.1"; exit 0; }
+if [ "$1" = "root" ] && [ "$2" = "--all" ]; then
+${ghqRoots.map((r) => `  echo "${r}"`).join('\n')}
+  exit 0
+fi
+if [ "$1" = "root" ]; then echo "${ghqRoots[0]}"; exit 0; fi
+exit 9
+`);
+  write('fzf', `#!/bin/sh
+[ "$1" = "--version" ] && { echo 0.74.1; exit 0; }
+if [ "$1" = "--filter" ]; then out=$(grep -F -- "$2"); [ -n "$out" ] || exit 1; printf '%s\\n' "$out"; exit 0; fi
+exit 2
+`);
+  return dir;
+}
+
+// One repository, one linked worktree, at paths the caller chooses.
+function repoAt(root, { repoRel, worktreeRel, agentSlug }) {
+  const home = realpathSync(root);
+  const repo = join(home, repoRel);
+  const gitEnv = {
+    ...process.env,
+    HOME: home,
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+  };
+  const g = (cwd, ...a) => {
+    const r = spawnSync('git', a, { cwd, encoding: 'utf8', env: gitEnv });
+    if (r.status !== 0) throw new Error(`git ${a.join(' ')}: ${r.stderr}`);
+    return (r.stdout ?? '').trim();
+  };
+  mkdirSync(repo, { recursive: true });
+  g(repo, 'init', '-q', '-b', 'main');
+  g(repo, 'config', 'user.email', 't@e.com');
+  g(repo, 'config', 'user.name', 'T');
+  writeFileSync(join(repo, 'a.txt'), 'x\n');
+  g(repo, 'add', '-A');
+  g(repo, 'commit', '-qm', 'init');
+  const out = { repo };
+  if (worktreeRel) {
+    out.worktree = join(home, worktreeRel);
+    mkdirSync(dirname(out.worktree), { recursive: true });
+    g(repo, 'worktree', 'add', '-q', '-b', 'feat/one', out.worktree);
+  }
+  if (agentSlug) {
+    out.agent = join(repo, '.claude', 'worktrees', agentSlug);
+    mkdirSync(join(repo, '.claude', 'worktrees'), { recursive: true });
+    g(repo, 'worktree', 'add', '-q', '-b', `agent/${agentSlug}`, out.agent);
+  }
+  return out;
+}
+
+test('a second ghq root is searched — `ghq root` alone names only the first', (t) => {
+  // Plain `ghq root` prints the primary root only, so every agent worktree
+  // under any other configured root was invisible, silently, exit 0. That is
+  // the failure class I1b exists to prevent.
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'gwqcd-2root-')));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const a = repoAt(home, { repoRel: 'rootA/github.com/o/repoA', agentSlug: 'agent-in-a' });
+  const b = repoAt(home, { repoRel: 'rootB/github.com/o/repoB', agentSlug: 'agent-in-b' });
+  // The basedir must exist, or discovery takes the gwq fallback and this test
+  // would be measuring that instead of the ghq roots.
+  mkdirSync(join(home, 'worktrees'), { recursive: true });
+  const shims = geometryShim({
+    basedir: join(home, 'worktrees'),
+    ghqRoots: [join(home, 'rootB'), join(home, 'rootA')],
+  });
+  t.after(() => rmSync(shims, { recursive: true, force: true }));
+
+  const r = run(['--list'], { shims, env: { HOME: home } });
+  assert.equal(r.status, 0, r.stderr);
+  const lines = r.stdout.trim().split('\n');
+  assert.ok(lines.includes(b.agent), `primary root missing:\n${r.stdout}`);
+  assert.ok(lines.includes(a.agent), `second ghq root was not searched:\n${r.stdout}`);
+});
+
+test('a gwq basedir nested under the ghq root keeps its worktrees', (t) => {
+  // I7c: skipping a root nested inside another "would drop a worktree.basedir
+  // configured under the ghq root and lose every gwq worktree". Nothing tested
+  // it, and both natural implementations of that mistake passed the suite.
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'gwqcd-nest-')));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const fx = repoAt(home, {
+    repoRel: 'ghq/github.com/o/repo',
+    worktreeRel: 'ghq/.worktrees/github.com/o/repo/feat-one',
+    agentSlug: 'agent-x',
+  });
+  const shims = geometryShim({
+    basedir: join(home, 'ghq', '.worktrees'),
+    ghqRoots: [join(home, 'ghq')],
+  });
+  t.after(() => rmSync(shims, { recursive: true, force: true }));
+
+  const r = run(['--list', '--json'], { shims, env: { HOME: home } });
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  const byPath = new Map(out.worktrees.map((w) => [w.path, w.source]));
+  assert.equal(byPath.get(fx.worktree), 'gwq', `the nested basedir was skipped:\n${r.stdout}`);
+  assert.equal(byPath.get(fx.agent), 'claude');
+  assert.ok(!byPath.has(fx.repo), 'the main clone must not appear');
+});
+
+test('a gwq basedir that is an ancestor of the ghq root does not leak main clones', (t) => {
+  // The other direction of the same overlap. Here the gwq walk reaches every
+  // main clone and used to emit all of them as gwq worktrees, breaking I7c's
+  // "the main clone does not appear". First-writer-wins cannot help: a
+  // peek-only root records nothing, so it never wins the race.
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'gwqcd-anc-')));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const fx = repoAt(home, { repoRel: 'ghq/github.com/o/repo', agentSlug: 'agent-y' });
+  const shims = geometryShim({ basedir: home, ghqRoots: [join(home, 'ghq')] });
+  t.after(() => rmSync(shims, { recursive: true, force: true }));
+
+  const r = run(['--list'], { shims, env: { HOME: home } });
+  assert.equal(r.status, 0, r.stderr);
+  const lines = r.stdout.trim().split('\n');
+  assert.ok(!lines.includes(fx.repo), `the main clone leaked as a gwq worktree:\n${r.stdout}`);
+  assert.ok(lines.includes(fx.agent), `the agent worktree should still be found:\n${r.stdout}`);
+});
+
+test('the same worktree reachable from two roots is listed once', (t) => {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'gwqcd-dup-')));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const fx = repoAt(home, { repoRel: 'ghq/github.com/o/repo', agentSlug: 'agent-z' });
+  // Same directory named twice, once as the basedir and once as an ghq root.
+  const shims = geometryShim({
+    basedir: join(home, 'ghq'),
+    ghqRoots: [join(home, 'ghq')],
+  });
+  t.after(() => rmSync(shims, { recursive: true, force: true }));
+
+  const r = run(['--list'], { shims, env: { HOME: home } });
+  assert.equal(r.status, 0, r.stderr);
+  const lines = r.stdout.trim().split('\n').filter(Boolean);
+  assert.deepEqual(lines, [fx.agent], `expected exactly the agent worktree:\n${r.stdout}`);
+  assert.equal(new Set(lines).size, lines.length, 'no duplicates');
+});
+
+test('the gwq fallback supplements the other roots instead of replacing them', (t) => {
+  // With the basedir gone, `gwq list -g --json` is the only way to learn the
+  // gwq worktrees — and an earlier cut returned *only* the fallback's entries,
+  // or skipped the fallback entirely because a herdr worktree had made the
+  // list non-empty. Both were silent losses.
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'gwqcd-supp-')));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const fx = repoAt(home, {
+    repoRel: 'ghq/github.com/o/repo',
+    worktreeRel: '.herdr/worktrees/repo/worktree-brave',
+  });
+  const dir = mkdtempSync(join(tmpdir(), 'gwqcd-suppshim-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const gwqJson = JSON.stringify([
+    { path: '/elsewhere/api/main', branch: 'main', commit_hash: 'aaa', is_main: true },
+    { path: '/elsewhere/api/feat-login', branch: 'feat/login', commit_hash: 'bbb', is_main: false },
+  ]);
+  writeFileSync(join(dir, 'gwq'), `#!/bin/sh
+[ "$1" = "--version" ] && { echo v0.1.1; exit 0; }
+if [ "$1" = "config" ]; then echo "${join(home, 'gone')}"; exit 0; fi
+if [ "$1" = "list" ]; then cat <<'J'
+${gwqJson}
+J
+exit 0; fi
+exit 0
+`);
+  chmodSync(join(dir, 'gwq'), 0o755);
+  writeFileSync(join(dir, 'ghq'), `#!/bin/sh
+[ "$1" = "--version" ] && { echo 1.10.1; exit 0; }
+[ "$1" = "root" ] && { echo "${join(home, 'ghq')}"; exit 0; }
+exit 9
+`);
+  chmodSync(join(dir, 'ghq'), 0o755);
+  writeFileSync(join(dir, 'fzf'), `#!/bin/sh
+[ "$1" = "--version" ] && { echo 0.74.1; exit 0; }
+if [ "$1" = "--filter" ]; then out=$(grep -F -- "$2"); [ -n "$out" ] || exit 1; printf '%s\\n' "$out"; exit 0; fi
+exit 2
+`);
+  chmodSync(join(dir, 'fzf'), 0o755);
+
+  const r = run(['--list'], { shims: dir, env: { HOME: home } });
+  assert.equal(r.status, 0, r.stderr);
+  const lines = r.stdout.trim().split('\n');
+  assert.ok(lines.includes('/elsewhere/api/feat-login'), `the fallback's gwq worktrees are missing:\n${r.stdout}`);
+  assert.ok(lines.includes(fx.worktree), `the herdr worktree was replaced by the fallback:\n${r.stdout}`);
+});
+
+test('an empty but walkable basedir does not drag in the 43-second fallback', (t) => {
+  // The fallback is for a basedir that cannot be walked. An empty one is a
+  // truthful empty gwq source, and routing it to `gwq list -g` would put the
+  // slow path back on an ordinary machine.
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'gwqcd-empty-')));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const fx = repoAt(home, { repoRel: 'ghq/github.com/o/repo', agentSlug: 'agent-w' });
+  mkdirSync(join(home, 'worktrees'), { recursive: true });
+  const shims = geometryShim({
+    basedir: join(home, 'worktrees'),
+    ghqRoots: [join(home, 'ghq')],
+  });
+  t.after(() => rmSync(shims, { recursive: true, force: true }));
+
+  const r = run(['--list'], { shims, env: { HOME: home } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(r.stdout.trim().split('\n'), [fx.agent]);
+  assert.doesNotMatch(r.stderr, /slow path/, '`gwq list` must not be reached');
+});
+
+test('$GHQ_ROOT is the fallback when there is no ghq binary, and it takes a list', (t) => {
+  // Deleting this branch of ghqRoots() passed the whole suite, because run()
+  // scrubs GHQ_ROOT and nothing set it back. It is the only path that supports
+  // several roots without ghq installed, so it needs its own test.
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'gwqcd-envroot-')));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const a = repoAt(home, { repoRel: 'envA/github.com/o/repoA', agentSlug: 'agent-envA' });
+  const b = repoAt(home, { repoRel: 'envB/github.com/o/repoB', agentSlug: 'agent-envB' });
+  mkdirSync(join(home, 'worktrees'), { recursive: true });
+  // withGhq: false — no ghq on PATH at all, so `ghq root --all` cannot answer.
+  const shims = homeShim({ base: join(home, 'worktrees'), ghqRoot: '', withGhq: false });
+  t.after(() => rmSync(shims, { recursive: true, force: true }));
+
+  const r = run(['--list'], {
+    shims,
+    env: { HOME: home, GHQ_ROOT: `${join(home, 'envA')}:${join(home, 'envB')}` },
+  });
+  assert.equal(r.status, 0, r.stderr);
+  const lines = r.stdout.trim().split('\n');
+  assert.ok(lines.includes(a.agent), `first $GHQ_ROOT entry not searched:\n${r.stdout}`);
+  assert.ok(lines.includes(b.agent), `second $GHQ_ROOT entry not searched:\n${r.stdout}`);
+  assert.ok(!lines.includes(a.repo), 'main clones stay out');
+});
+
+test('$GHQ_ROOT loses to a working ghq, which is the authority', (t) => {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'gwqcd-envlose-')));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const real = repoAt(home, { repoRel: 'ghq/github.com/o/repo', agentSlug: 'agent-real' });
+  const decoy = repoAt(home, { repoRel: 'decoy/github.com/o/repo', agentSlug: 'agent-decoy' });
+  mkdirSync(join(home, 'worktrees'), { recursive: true });
+  const shims = geometryShim({
+    basedir: join(home, 'worktrees'),
+    ghqRoots: [join(home, 'ghq')],
+  });
+  t.after(() => rmSync(shims, { recursive: true, force: true }));
+
+  const r = run(['--list'], {
+    shims,
+    env: { HOME: home, GHQ_ROOT: join(home, 'decoy') },
+  });
+  assert.equal(r.status, 0, r.stderr);
+  const lines = r.stdout.trim().split('\n');
+  assert.ok(lines.includes(real.agent), `ghq's own answer was ignored:\n${r.stdout}`);
+  assert.ok(!lines.includes(decoy.agent), `$GHQ_ROOT overrode a working ghq:\n${r.stdout}`);
+});
+
+test('a main clone whose .git is a symlink still does not leak', (t) => {
+  // A Dirent is lstat, so a `.git` symlinked to a git directory elsewhere
+  // reports isDirectory() false and would be mistaken for a linked worktree —
+  // putting the main clone straight back into the list.
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'gwqcd-symgit-')));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const fx = repoAt(home, { repoRel: 'ghq/github.com/o/repo', agentSlug: 'agent-sym' });
+  // Move the repository's .git aside and symlink it back, the way a developer
+  // relocating a large object store would.
+  const moved = join(home, 'elsewhere.git');
+  renameSync(join(fx.repo, '.git'), moved);
+  symlinkSync(moved, join(fx.repo, '.git'), 'dir');
+  const shims = geometryShim({ basedir: home, ghqRoots: [join(home, 'ghq')] });
+  t.after(() => rmSync(shims, { recursive: true, force: true }));
+
+  const r = run(['--list'], { shims, env: { HOME: home } });
+  assert.equal(r.status, 0, r.stderr);
+  const lines = r.stdout.trim().split('\n');
+  assert.ok(!lines.includes(fx.repo),
+    `a main clone with a symlinked .git leaked:\n${r.stdout}`);
+});
+
+test('a --separate-git-dir main clone does not leak — its .git is a plain file', (t) => {
+  // `git init --separate-git-dir` puts a regular file in a *main* clone, no
+  // symlink involved. It is what dotfile managers produce, and it breaks the
+  // "a .git file means a linked worktree" shortcut outright: the payload used
+  // to carry `isMain: true` beside a Dirent test that said otherwise.
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'gwqcd-sep-')));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const fx = repoAt(home, { repoRel: 'ghq/github.com/o/repo', agentSlug: 'agent-sep' });
+  const gitdir = join(home, 'gitdirs', 'repo.git');
+  mkdirSync(dirname(gitdir), { recursive: true });
+  renameSync(join(fx.repo, '.git'), gitdir);
+  writeFileSync(join(fx.repo, '.git'), `gitdir: ${gitdir}\n`);
+  const shims = geometryShim({ basedir: home, ghqRoots: [join(home, 'ghq')] });
+  t.after(() => rmSync(shims, { recursive: true, force: true }));
+
+  const r = run(['--list'], { shims, env: { HOME: home } });
+  assert.equal(r.status, 0, r.stderr);
+  const lines = r.stdout.trim().split('\n');
+  assert.ok(!lines.includes(fx.repo),
+    `a --separate-git-dir main clone leaked:\n${r.stdout}`);
+});
+
+test('a bare repository is pruned rather than walked', (t) => {
+  // `ghq get --bare` is a real flag, and a bare repo has no `.git` at all — so
+  // the walk used to enumerate its object store to the depth guard, +40ms for
+  // one repo with a full loose fanout. It can hold no worktree of its own.
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'gwqcd-bare-')));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const bare = join(home, 'ghq', 'github.com', 'o', 'repo.git');
+  mkdirSync(bare, { recursive: true });
+  const r0 = spawnSync('git', ['init', '-q', '--bare', bare], { encoding: 'utf8' });
+  assert.equal(r0.status, 0, r0.stderr);
+  // A decoy deep in the object store that the walk would *emit* if it
+  // descended: a directory with a .git, holding an agent worktree of its own.
+  // The peek labels that `claude` regardless of the root's emitAs, so it shows
+  // up in --list the moment the prune is removed.
+  const deep = join(bare, 'objects', 'ab', 'cd', 'planted');
+  const decoyAgent = join(deep, '.claude', 'worktrees', 'wt-in-objects');
+  mkdirSync(decoyAgent, { recursive: true });
+  writeFileSync(join(deep, '.git'), 'gitdir: /nowhere\n');
+  writeFileSync(join(decoyAgent, '.git'), 'gitdir: /nowhere/worktrees/wt\n');
+  const alongside = repoAt(home, { repoRel: 'ghq/github.com/o/normal', agentSlug: 'agent-n' });
+  mkdirSync(join(home, 'worktrees'), { recursive: true });
+  const shims = geometryShim({
+    basedir: join(home, 'worktrees'),
+    ghqRoots: [join(home, 'ghq')],
+  });
+  t.after(() => rmSync(shims, { recursive: true, force: true }));
+
+  const r = run(['--list'], { shims, env: { HOME: home } });
+  assert.equal(r.status, 0, r.stderr);
+  const lines = r.stdout.trim().split('\n').filter(Boolean);
+  assert.doesNotMatch(r.stdout, /objects/,
+    `the walk descended into a bare object store:\n${r.stdout}`);
+  assert.ok(!lines.includes(decoyAgent), 'nothing inside a bare repo may be listed');
+  assert.deepEqual(lines, [alongside.agent],
+    `only the neighbouring repo's agent worktree should appear:\n${r.stdout}`);
+});
+
+test('agent nesting is not rationed by how deep the repository sits', (t) => {
+  // The walk's directory depth and the agent-generation count used to share
+  // one counter, so the same chain truncated at a different length depending
+  // on where its repository happened to live. Two identical six-deep chains,
+  // one in a shallow root and one four levels down, must both come back whole.
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'gwqcd-gen-')));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const gitEnv = {
+    ...process.env,
+    HOME: home,
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+  };
+  const g = (cwd, ...a) => {
+    const r = spawnSync('git', a, { cwd, encoding: 'utf8', env: gitEnv });
+    if (r.status !== 0) throw new Error(`git ${a.join(' ')}: ${r.stderr}`);
+  };
+  const CHAIN = 6;
+  const chainUnder = (repoRel, tag) => {
+    const repo = join(home, repoRel);
+    mkdirSync(repo, { recursive: true });
+    g(repo, 'init', '-q', '-b', 'main');
+    g(repo, 'config', 'user.email', 't@e.com');
+    g(repo, 'config', 'user.name', 'T');
+    writeFileSync(join(repo, 'a.txt'), 'x\n');
+    g(repo, 'add', '-A');
+    g(repo, 'commit', '-qm', 'init');
+    const made = [];
+    let host = repo;
+    for (let i = 0; i < CHAIN; i++) {
+      const wt = join(host, '.claude', 'worktrees', `${tag}-${i}`);
+      mkdirSync(dirname(wt), { recursive: true });
+      g(repo, 'worktree', 'add', '-q', '-b', `${tag}/${i}`, wt);
+      made.push(wt);
+      host = wt;
+    }
+    return made;
+  };
+  // Shallow: <root>/repo. Deep: <root>/a/b/c/repo, four levels in.
+  const shallow = chainUnder('ghq/shallow', 'sh');
+  const deep = chainUnder('ghq/a/b/c/deep', 'dp');
+  mkdirSync(join(home, 'worktrees'), { recursive: true });
+  const shims = geometryShim({
+    basedir: join(home, 'worktrees'),
+    ghqRoots: [join(home, 'ghq')],
+  });
+  t.after(() => rmSync(shims, { recursive: true, force: true }));
+
+  const r = run(['--list'], { shims, env: { HOME: home } });
+  assert.equal(r.status, 0, r.stderr);
+  const lines = new Set(r.stdout.trim().split('\n'));
+  const missing = [...shallow, ...deep].filter((w) => !lines.has(w));
+  assert.deepEqual(missing, [],
+    `${missing.length} of ${CHAIN * 2} agent worktrees were rationed away:\n${r.stdout}`);
+});
+
+// A gwq whose basedir is whatever the caller says and whose `list` reports one
+// worktree, so "did the fallback run" is directly observable.
+function fallbackShim({ basedir, ghqRoot }) {
+  const dir = mkdtempSync(join(tmpdir(), 'gwqcd-fbshim-'));
+  const write = (name, body) => {
+    writeFileSync(join(dir, name), body);
+    chmodSync(join(dir, name), 0o755);
+  };
+  write('gwq', `#!/bin/sh
+[ "$1" = "--version" ] && { echo "gwq version v0.1.1"; exit 0; }
+if [ "$1" = "config" ]; then echo "${basedir}"; exit 0; fi
+if [ "$1" = "list" ]; then cat <<'J'
+[{"path":"/elsewhere/api/feat-login","branch":"feat/login","commit_hash":"bbb2222","is_main":false}]
+J
+exit 0; fi
+exit 0
+`);
+  write('ghq', `#!/bin/sh
+[ "$1" = "--version" ] && { echo "ghq version 1.10.1"; exit 0; }
+[ "$1" = "root" ] && { echo "${ghqRoot}"; exit 0; }
+exit 9
+`);
+  write('fzf', `#!/bin/sh
+[ "$1" = "--version" ] && { echo 0.74.1; exit 0; }
+if [ "$1" = "--filter" ]; then out=$(grep -F -- "$2"); [ -n "$out" ] || exit 1; printf '%s\\n' "$out"; exit 0; fi
+exit 2
+`);
+  return dir;
+}
+
+for (const [label, prepare] of [
+  ['a regular file', (bd) => writeFileSync(bd, 'oops\n')],
+  ['an unreadable directory', (bd) => { mkdirSync(bd, { recursive: true }); chmodSync(bd, 0o000); }],
+]) {
+  test(`a basedir that is ${label} still reaches the fallback`, (t) => {
+    // realpath succeeding is not the same as the directory being walkable.
+    // Counting it as a usable root suppressed the fallback and lost every gwq
+    // worktree, silently, while a herdr worktree kept the list non-empty —
+    // the ENOENT case's bug by way of ENOTDIR and EACCES.
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'gwqcd-badbase-')));
+    const basedir = join(home, 'basedir');
+    t.after(() => {
+      try { chmodSync(basedir, 0o755); } catch { /* it is a file */ }
+      rmSync(home, { recursive: true, force: true });
+    });
+    const fx = repoAt(home, {
+      repoRel: 'ghq/github.com/o/repo',
+      worktreeRel: '.herdr/worktrees/repo/wt-herdr',
+    });
+    prepare(basedir);
+    const shims = fallbackShim({ basedir, ghqRoot: join(home, 'ghq') });
+    t.after(() => rmSync(shims, { recursive: true, force: true }));
+
+    const r = run(['--list'], { shims, env: { HOME: home } });
+    assert.equal(r.status, 0, r.stderr);
+    const lines = r.stdout.trim().split('\n');
+    assert.ok(lines.includes('/elsewhere/api/feat-login'),
+      `the fallback was suppressed and the gwq worktrees vanished:\n${r.stdout}`);
+    assert.ok(lines.includes(fx.worktree), `the herdr worktree should survive too:\n${r.stdout}`);
+  });
+}
 
 // ── the emitted function, actually run ───────────────────────────────────────
 //
@@ -415,12 +1194,46 @@ test('an unreadable or absent basedir falls back to gwq rather than failing', ()
 // became "no such file or directory: gwqcd x.y.z" and `--help` became
 // "file name too long". Run the function for real.
 
+// I3 step 1 is "PATH first", which means that with a global gwqcd installed
+// these tests were running *that* binary and not the one under review — and
+// `assert.match(stdout, /^gwqcd \d+\.\d+\.\d+/)` passed either way. Pin PATH
+// to a directory holding only node, so step 1 finds nothing and the snippet
+// falls through to its baked-in path (step 2), which is this working copy.
+const NODE_ONLY = (() => {
+  const dir = mkdtempSync(join(tmpdir(), 'gwqcd-nodeonly-'));
+  symlinkSync(process.execPath, join(dir, 'node'));
+  // Module-level, so it outlives every test; `exit` is the only hook that
+  // covers both a clean finish and a failing one.
+  process.on('exit', () => { try { rmSync(dir, { recursive: true, force: true }); } catch { /* gone */ } });
+  return dir;
+})();
+
+// The shell itself is launched by absolute path, because the pinned PATH below
+// deliberately excludes the directories a shell may live in — fish is under
+// /opt/homebrew/bin on this machine and would not be found otherwise.
+function shellPath(shell) {
+  for (const dir of (process.env.PATH ?? '').split(':')) {
+    if (!dir) continue;
+    const candidate = join(dir, shell);
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+// PATH holds node and the system directories git lives in, and nothing else, so
+// I3 step 1 finds no gwqcd and the snippet falls through to its baked-in path.
+const shellEnv = () => {
+  const env = { ...process.env, PATH: `${NODE_ONLY}:/usr/bin:/bin`, NO_COLOR: '1' };
+  delete env.FORCE_COLOR;
+  return env;
+};
+
 function shellRun(shell, args) {
+  const bin = shellPath(shell);
   const init = run(['--init', shell]).stdout;
-  const script = shell === 'fish'
-    ? `${init}\ngwqcd ${args.join(' ')}`
-    : `${init}\ngwqcd ${args.join(' ')}`;
-  return spawnSync(shell, ['-c', script], { encoding: 'utf8' });
+  return spawnSync(bin, ['-c', `${init}\ngwqcd ${args.join(' ')}`], {
+    encoding: 'utf8', env: shellEnv(),
+  });
 }
 
 for (const shell of ['zsh', 'bash', 'fish']) {
@@ -428,7 +1241,10 @@ for (const shell of ['zsh', 'bash', 'fish']) {
     if (spawnSync(shell, ['-c', 'true'], { stdio: 'ignore' }).error) return t.skip(`${shell} missing`);
     const r = shellRun(shell, ['--version']);
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /^gwqcd \d+\.\d+\.\d+/m);
+    // The version of *this* working copy, so a globally installed gwqcd
+    // answering instead is a failure rather than a pass.
+    assert.match(r.stdout, new RegExp(`^gwqcd ${PKG_VERSION.replaceAll('.', '\\.')}$`, 'm'),
+      `the emitted function must run this copy, not another gwqcd on PATH:\n${r.stdout}`);
     assert.doesNotMatch(r.stderr, /cd:|no such file|not a directory/);
   });
 
@@ -460,8 +1276,11 @@ test('re-sourcing is idempotent even with a stale function defined', (t) => {
   // A pre-`command` function: captures stdout and cds into it, whatever it is.
   const stale = `gwqcd() { local d; d=$(echo stale) || return $?; builtin cd -- "$d"; }`;
   const script = [stale, init, 'gwqcd --version'].join('\n');
-  const r = spawnSync('zsh', ['-c', script], { encoding: 'utf8' });
+  const r = spawnSync(shellPath('zsh'), ['-c', script], {
+    encoding: 'utf8', env: shellEnv(),
+  });
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /^gwqcd \d+\.\d+\.\d+/m, 'the new function must have replaced the stale one');
+  assert.match(r.stdout, new RegExp(`^gwqcd ${PKG_VERSION.replaceAll('.', '\\.')}$`, 'm'),
+    'the new function must have replaced the stale one, and must be this copy');
   assert.doesNotMatch(r.stderr, /cd:|no such file/);
 });
