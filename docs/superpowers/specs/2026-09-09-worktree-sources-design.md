@@ -327,3 +327,41 @@ real `HOME` and gitconfig, and the shell-function tests resolved whatever
 The performance section above was rewritten for the same reason — the numbers
 in the first draft were inferred, not measured, and had the conclusion
 backwards.
+
+### A second round, on the fixes themselves
+
+Each of the four fixes was re-reviewed, and three of them had a further defect.
+Recording this because the pattern is the lesson: every one was a case of
+fixing the example rather than the class.
+
+**Main-clone detection, twice wrong before it was right.** The first fix asked
+whether `.git` was a directory. That misses a symlinked `.git`, so I patched
+the symlink. Review then pointed out the real counterexample:
+`git init --separate-git-dir` puts a plain regular file at `.git` **in a main
+clone** — what dotfile managers produce — so the premise was false, not
+incomplete. The payload had been contradicting itself all along, `isMain: true`
+from `rev-parse` beside a Dirent test that said otherwise, with `--no-main`
+deleting the evidence. The answer was git's own invariant, the same regex
+`metaFromRevParse` uses, which made the symlink patch redundant.
+
+**The fallback condition, wrong again by a different errno.** "Could not be
+walked" was implemented as "could not be realpath'd". A basedir typo'd onto a
+regular file, or a `chmod 000` directory, realpaths fine, throws from readdir,
+counts as usable, and suppresses the fallback — the same silent loss, reached
+through ENOTDIR and EACCES rather than ENOENT.
+
+**The generation counter was right; the review was reading my mutation.** It
+reported the fix as a no-op with the walk depth still seeded in. It was reading
+`bin/gwqcd.mjs` during the window where I had deliberately written the old
+behaviour back to disk to prove the new test kills it. Two processes, one
+working tree. The same collision is the best available explanation for a
+one-off suite failure earlier in the day that resisted every attempt to
+reproduce: six consecutive runs in an isolated copy are clean.
+
+Also from that round: the main-clone read was eager and discarded 44 of 44
+results on an ordinary machine, and bare repositories were being walked through
+their object stores. Both fixed. Two blind spots are documented rather than
+chased — a linked worktree whose host uses `--separate-git-dir` reads as a main
+clone, and nothing inside a bare directory is found.
+
+The suite is at 72 tests.
