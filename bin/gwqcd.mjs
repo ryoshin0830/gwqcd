@@ -524,6 +524,25 @@ async function gwqBasedir() {
   return expandTilde(out.trim().split('\n')[0]?.trim() ?? '');
 }
 
+// ghq is asked rather than reimplemented: it supports several roots and reads
+// them from three places. The fallbacks keep the claude source working when ghq
+// is not installed at all, and ~/ghq is ghq's own documented default rather
+// than a guess of ours.
+//
+// ghq is deliberately NOT in `ensureTool`. I1b requires git because without it
+// gwq reports zero worktrees to someone who has 44 — a wrong answer delivered
+// silently. Missing ghq is not that: it means there is no ghq tree to search,
+// so this source is empty and every other source returns what it always did.
+async function ghqRoots() {
+  const out = await capture('ghq', ['root']);
+  if (out != null && out.trim()) {
+    return out.trim().split('\n').map((l) => expandTilde(l.trim())).filter(Boolean);
+  }
+  const env = process.env.GHQ_ROOT;
+  if (env) return env.split(':').map((q) => expandTilde(q.trim())).filter(Boolean);
+  return [joinPath(homedir(), 'ghq')];
+}
+
 // Prune at the worktree. Descending into one means walking node_modules and
 // vendor trees, which is where gwq's own 43 seconds go.
 //
@@ -687,8 +706,17 @@ async function discoverWorktrees() {
   }
 
   const found = new Map(); // path -> source, first writer wins
-  const basedir = await gwqBasedir();
-  for (const root of usableRoots([{ dir: basedir, emitAs: 'gwq' }])) {
+
+  // The two subprocess lookups are the only slow part of discovery, so they
+  // overlap: the added wall-clock is the slower of the two, not their sum.
+  const [basedir, ghq] = await Promise.all([gwqBasedir(), ghqRoots()]);
+
+  for (const root of usableRoots([
+    { dir: basedir, emitAs: 'gwq' },
+    // emitAs null: walked for the `.claude/worktrees` inside its repositories,
+    // never for the repositories themselves.
+    ...ghq.map((dir) => ({ dir, emitAs: null })),
+  ])) {
     for (const e of walkWorktrees(root.dir, { emitAs: root.emitAs })) {
       if (!found.has(e.path)) found.set(e.path, e.source);
     }

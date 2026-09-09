@@ -51,16 +51,32 @@ exit 2
   return dir;
 }
 
+// Hermetic against the developer's own machine, which the ghq root made a live
+// problem: PATH is the shim directory plus the system directories git lives in
+// and nothing else, so a real gwq, ghq or fzf cannot answer a question a shim
+// was written for. HOME is a fresh empty directory for the same reason — the
+// herdr root and the `~/ghq` fallback have to land somewhere the test controls,
+// or the suite starts reporting the developer's own 44 repositories. GHQ_ROOT
+// goes for the same reason as FORCE_COLOR: it is theirs, not ours.
 function run(args, { shims, cwd, env } = {}) {
   const dir = shims ?? makeShims();
-  const childEnv = { ...process.env, PATH: `${dir}:${process.env.PATH}`, NO_COLOR: '1', ...env };
+  const ownHome = env?.HOME ? null : mkdtempSync(join(tmpdir(), 'gwqcd-nohome-'));
+  const childEnv = {
+    ...process.env,
+    PATH: `${dir}:/usr/bin:/bin`,
+    HOME: env?.HOME ?? ownHome,
+    NO_COLOR: '1',
+    ...env,
+  };
   // We force NO_COLOR; node itself warns to stderr when FORCE_COLOR is also
   // set, so a developer who exports it would otherwise see phantom failures.
   delete childEnv.FORCE_COLOR;
+  delete childEnv.GHQ_ROOT;
   const r = spawnSync(process.execPath, [BIN, ...args], {
     encoding: 'utf8', env: childEnv, ...(cwd ? { cwd } : {}),
   });
   if (!shims) rmSync(dir, { recursive: true, force: true });
+  if (ownHome) rmSync(ownHome, { recursive: true, force: true });
   return r;
 }
 
@@ -417,7 +433,8 @@ exit 2
 }
 
 // Runs the CLI against a fixture home: HOME is redirected so the herdr root and
-// every tilde expansion land inside the fixture.
+// every tilde expansion land inside the fixture, and run() keeps the real
+// gwq/ghq/fzf off PATH so only the shims answer.
 function runIn(fx, args, { withGhq = true } = {}) {
   const shims = homeShim({ base: fx.base, ghqRoot: fx.ghqRoot, withGhq });
   try {
@@ -487,6 +504,73 @@ test('an unreadable or absent basedir falls back to gwq rather than failing', ()
   // The shim's `list` exits 9, which is the fallback being reached — the point
   // is that it is reached at all rather than reporting an empty list.
   assert.equal(jsonLine(r.stderr).error.code, 'E_GWQ');
+});
+
+test('`claude -w` worktrees inside a main clone are found', () => {
+  const fx = realHome();
+  const r = runIn(fx, ['--list']);
+  const out = r.stdout;
+  rmSync(fx.home, { recursive: true, force: true });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(out.includes(join(fx.repo, '.claude/worktrees/drifting-giggling-pond')), out);
+  assert.ok(out.includes(join(fx.repo, '.claude/worktrees/agent-aed5fc34')), out);
+});
+
+test('main clones under the ghq root are NOT listed', () => {
+  // Walking ~/ghq for what is inside its repositories must not turn gwqcd into
+  // a worse ghqcd. The main clone is ghqcd's job.
+  const fx = realHome();
+  const r = runIn(fx, ['--list']);
+  const lines = r.stdout.trim().split('\n');
+  rmSync(fx.home, { recursive: true, force: true });
+  assert.ok(!lines.includes(fx.repo), `the main clone leaked into the list:\n${r.stdout}`);
+});
+
+test('an agent that started an agent is found', () => {
+  // The recursion lives in collectClaudeWorktrees, but the nested worktree in
+  // the fixture sits under the ghq root, so it is only reachable once that root
+  // is walked.
+  const fx = realHome();
+  const r = runIn(fx, ['--list']);
+  rmSync(fx.home, { recursive: true, force: true });
+  assert.ok(r.stdout.includes('quizzical-jumping-tome'), r.stdout);
+});
+
+test('a detached `agent-…` worktree reports no branch, not a crash', () => {
+  const fx = realHome();
+  const r = runIn(fx, ['--list', '--json']);
+  const out = JSON.parse(r.stdout);
+  rmSync(fx.home, { recursive: true, force: true });
+  const agent = out.worktrees.find((w) => w.path.endsWith('agent-aed5fc34'));
+  assert.equal(agent.branch, '', 'a detached HEAD has no branch');
+  assert.match(agent.commit, /^[0-9a-f]{40}$/);
+});
+
+test('without the ghq binary the ~/ghq fallback still finds agent worktrees', () => {
+  // `ghq root` is asked first, but its absence is not the end of it: $GHQ_ROOT,
+  // then ghq's own documented default of ~/ghq. The fixture home has one.
+  const fx = realHome();
+  const r = runIn(fx, ['--list'], { withGhq: false });
+  const out = r.stdout;
+  rmSync(fx.home, { recursive: true, force: true });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(out.includes(join(fx.repo, '.claude/worktrees/drifting-giggling-pond')), out);
+});
+
+test('no ghq at all leaves the gwq source untouched and does not exit 127', () => {
+  // ghq is optional, unlike git (I1b): no binary and no ~/ghq means there is no
+  // tree to search, which is today's correct behavior — not exit 127.
+  const fx = realHome();
+  const bare = mkdtempSync(join(tmpdir(), 'gwqcd-noghq-'));
+  const shims = homeShim({ base: fx.base, ghqRoot: fx.ghqRoot, withGhq: false });
+  const r = run(['--list'], { shims, env: { HOME: bare } });
+  rmSync(shims, { recursive: true, force: true });
+  rmSync(bare, { recursive: true, force: true });
+  const out = r.stdout;
+  rmSync(fx.home, { recursive: true, force: true });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(out.includes(join(fx.base, 'host/owner/repo/feat-one')), out);
+  assert.doesNotMatch(out, /ghq\/host\/owner\/repo\/\.claude/, 'no ghq root to search');
 });
 
 // ── the emitted function, actually run ───────────────────────────────────────
