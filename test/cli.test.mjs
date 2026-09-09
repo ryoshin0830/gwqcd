@@ -64,17 +64,21 @@ exit 2
 function run(args, { shims, cwd, env } = {}) {
   const dir = shims ?? makeShims();
   const ownHome = env?.HOME ? null : mkdtempSync(join(tmpdir(), 'gwqcd-nohome-'));
-  const childEnv = {
-    ...process.env,
+  const childEnv = { ...process.env };
+  // We force NO_COLOR; node itself warns to stderr when FORCE_COLOR is also
+  // set, so a developer who exports it would otherwise see phantom failures.
+  // GHQ_ROOT goes for the same reason: it is theirs, not ours.
+  //
+  // Both are dropped *before* the caller's own env is applied, so a test that
+  // deliberately sets GHQ_ROOT — the fallback branch has to be exercised
+  // somehow — still gets it, while an exported one can never leak in.
+  delete childEnv.FORCE_COLOR;
+  delete childEnv.GHQ_ROOT;
+  Object.assign(childEnv, {
     PATH: `${dir}:/usr/bin:/bin`,
     HOME: env?.HOME ?? ownHome,
     NO_COLOR: '1',
-    ...env,
-  };
-  // We force NO_COLOR; node itself warns to stderr when FORCE_COLOR is also
-  // set, so a developer who exports it would otherwise see phantom failures.
-  delete childEnv.FORCE_COLOR;
-  delete childEnv.GHQ_ROOT;
+  }, env);
   const r = spawnSync(process.execPath, [BIN, ...args], {
     encoding: 'utf8', env: childEnv, ...(cwd ? { cwd } : {}),
   });
@@ -933,6 +937,52 @@ test('an empty but walkable basedir does not drag in the 43-second fallback', (t
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual(r.stdout.trim().split('\n'), [fx.agent]);
   assert.doesNotMatch(r.stderr, /slow path/, '`gwq list` must not be reached');
+});
+
+test('$GHQ_ROOT is the fallback when there is no ghq binary, and it takes a list', (t) => {
+  // Deleting this branch of ghqRoots() passed the whole suite, because run()
+  // scrubs GHQ_ROOT and nothing set it back. It is the only path that supports
+  // several roots without ghq installed, so it needs its own test.
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'gwqcd-envroot-')));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const a = repoAt(home, { repoRel: 'envA/github.com/o/repoA', agentSlug: 'agent-envA' });
+  const b = repoAt(home, { repoRel: 'envB/github.com/o/repoB', agentSlug: 'agent-envB' });
+  mkdirSync(join(home, 'worktrees'), { recursive: true });
+  // withGhq: false — no ghq on PATH at all, so `ghq root --all` cannot answer.
+  const shims = homeShim({ base: join(home, 'worktrees'), ghqRoot: '', withGhq: false });
+  t.after(() => rmSync(shims, { recursive: true, force: true }));
+
+  const r = run(['--list'], {
+    shims,
+    env: { HOME: home, GHQ_ROOT: `${join(home, 'envA')}:${join(home, 'envB')}` },
+  });
+  assert.equal(r.status, 0, r.stderr);
+  const lines = r.stdout.trim().split('\n');
+  assert.ok(lines.includes(a.agent), `first $GHQ_ROOT entry not searched:\n${r.stdout}`);
+  assert.ok(lines.includes(b.agent), `second $GHQ_ROOT entry not searched:\n${r.stdout}`);
+  assert.ok(!lines.includes(a.repo), 'main clones stay out');
+});
+
+test('$GHQ_ROOT loses to a working ghq, which is the authority', (t) => {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'gwqcd-envlose-')));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const real = repoAt(home, { repoRel: 'ghq/github.com/o/repo', agentSlug: 'agent-real' });
+  const decoy = repoAt(home, { repoRel: 'decoy/github.com/o/repo', agentSlug: 'agent-decoy' });
+  mkdirSync(join(home, 'worktrees'), { recursive: true });
+  const shims = geometryShim({
+    basedir: join(home, 'worktrees'),
+    ghqRoots: [join(home, 'ghq')],
+  });
+  t.after(() => rmSync(shims, { recursive: true, force: true }));
+
+  const r = run(['--list'], {
+    shims,
+    env: { HOME: home, GHQ_ROOT: join(home, 'decoy') },
+  });
+  assert.equal(r.status, 0, r.stderr);
+  const lines = r.stdout.trim().split('\n');
+  assert.ok(lines.includes(real.agent), `ghq's own answer was ignored:\n${r.stdout}`);
+  assert.ok(!lines.includes(decoy.agent), `$GHQ_ROOT overrode a working ghq:\n${r.stdout}`);
 });
 
 // ── the emitted function, actually run ───────────────────────────────────────
