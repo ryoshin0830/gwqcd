@@ -80,7 +80,7 @@ EXIT CODES
   1    validation / generic failure (E_VALIDATION, E_GWQ)
   2    no worktree matched (E_NO_MATCH)
   3    non-interactive and the query was ambiguous or absent (E_AMBIGUOUS)
-  127  gwq or fzf not installed (E_DEPS)
+  127  git, gwq or fzf not installed (E_DEPS)
   130  interrupted — Esc or Ctrl-C in fzf (E_INTERRUPTED)
 `;
 
@@ -516,9 +516,11 @@ async function confirmYesNo(question) {
 // it, and stop descending the moment a worktree is found. Metadata comes from
 // git, and only for the entries that actually need it.
 //
-// Measured on the same 44: 12ms to walk, 231ms to resolve every branch and sha,
-// 272ms worst case against 7600ms. The interactive path needs no metadata at
-// all, so it lands in about 50ms.
+// Measured on the same 44 in August 2026: 12ms to walk, 231ms to resolve every
+// branch and sha, 272ms worst case against 7600ms.
+//
+// Re-measured 2026-09-09 with three roots and 128 worktrees: discovery 102ms,
+// a jump about 180ms, `gwq list -g --json` 43.7s. See CLAUDE.md I7c.
 //
 // The one entry this drops that gwq reported is a submodule checkout nested
 // inside a worktree — its own repository, not a worktree anyone wants to cd to.

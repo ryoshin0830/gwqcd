@@ -75,9 +75,13 @@ their sum.
 
 | root        | resolution                                                             | cost |
 | ----------- | ---------------------------------------------------------------------- | ---- |
-| gwq basedir | `gwq config get worktree.basedir`, tilde expanded by us. Unchanged.    | 41ms |
-| ghq root    | `ghq root`; failing that `$GHQ_ROOT` split on `:`; failing that `~/ghq` | 45ms |
+| gwq basedir | `gwq config get worktree.basedir`, tilde expanded by us. Unchanged.    | 11ms |
+| ghq root    | `ghq root`; failing that `$GHQ_ROOT` split on `:`; failing that `~/ghq` | 52ms |
 | herdr root  | `~/.herdr/worktrees`                                                   | 0    |
+
+Concurrency buys less here than the framing suggests: 55ms together against
+63ms in sequence, because the gwq lookup is nearly free. It is still the right
+shape, and it costs nothing.
 
 Roots that do not exist are dropped, and each one is resolved through
 `realpath` before the walk so every path built from it is spelled one way.
@@ -194,7 +198,9 @@ resolved only for what gets printed.
 Measured on this machine: 44 ghq repositories, 115 gwq worktrees, 11 from
 `claude -w`, 1 from herdr.
 
-| step                                            | cost      |
+These were the design-time estimates, taken from a standalone harness:
+
+| step                                            | estimate  |
 | ----------------------------------------------- | --------- |
 | `gwq config get` and `ghq root`, concurrent     | 45ms      |
 | walk `~/ghq`, prune at `.git`, peek `.claude`   | 9ms       |
@@ -203,16 +209,31 @@ Measured on this machine: 44 ghq repositories, 115 gwq worktrees, 11 from
 | **discovery, all three roots**                  | **75ms**  |
 | for contrast: `gwq list -g --json`              | 43,756ms  |
 
-End to end on the finished implementation, 128 worktrees, three runs each:
-`--list` costs 212–231ms and `--list --json` costs 844–1003ms, against a bare
-`node -e ''` at 33ms.
+**Measured afterwards, inside the real binary, they were wrong.** Probes around
+`ensureTool` and `discoverWorktrees`, medians of six `--list` runs:
 
-Two roots therefore cost about 50ms on a jump. The honest surprise in those
-numbers is that they are no longer where the time goes: `ensureTool`'s three
-sequential `--version` spawns account for roughly 120ms of the 220ms, and they
-predate this change. Making them concurrent is the next real win and is left
-out of scope here, because the check order is what makes the error name the
-right tool and a test asserts it.
+| step                                            | measured  |
+| ----------------------------------------------- | --------- |
+| root resolution, concurrent                     | 55ms      |
+| the three walks, including the `.claude` peeks  | 50ms      |
+| **discovery, all three roots**                  | **102ms** |
+| `ensureTool`, three `--version` spawns          | 45ms      |
+| a jump, `--quiet <query>`, end to end           | 180ms     |
+| `--list --json`, 128 `rev-parse` 16 at a time   | 870ms     |
+
+The estimates understated the walks by 20ms, because the standalone harness ran
+with a warm cache and without the `existsSync` peek per candidate. The larger
+mistake was a claim this document made and CLAUDE.md repeated: that
+`ensureTool` dominated a jump at "about 120ms of 220ms". That figure was never
+probed — it was the remainder after subtracting the estimates from a wall clock,
+and it was off by 2.7×. Instrumented, discovery is the larger term in every
+run.
+
+The genuine finding, once measured, is narrower and more useful: **`ghq root`
+alone is 52ms**, half of discovery, against 11ms for `gwq config get`. Not
+spawning ghq at all — reading `$GHQ_ROOT`, then `git config --get-all
+ghq.root`, then `~/ghq` — would cost about 11ms and was rejected above on
+authority grounds. That is the trade to revisit, not `ensureTool`.
 
 ## Testing
 

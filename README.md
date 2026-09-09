@@ -71,8 +71,8 @@ and Node >= 20.12. **No `jq`.** `ghq` is optional — see below.
 `claude -w` puts its worktree *inside* the repository it belongs to, so `gwqcd`
 looks inside every repository under `ghq root` — and inside every worktree it
 already found, because an agent can start an agent. It never descends into a
-repository past that one directory, which is what keeps the whole search near
-30ms.
+repository past that one directory, which is what keeps the three walks at
+about 50ms across 44 repositories and 128 worktrees.
 
 `ghq` is optional. Without it there is no ghq root to search and the `claude`
 source is empty; every other source is unaffected. Repositories outside ghq's
@@ -84,11 +84,16 @@ root are not searched.
 
 `gwq list -g` shells out to git for every entry it finds under the base
 directory, including files inside worktrees: **43.7 seconds** on 115 worktrees
-here, up from 7.6 seconds a year ago as worktrees accumulated. `gwqcd`
-implements gwq's rule — "all worktrees in the configured base directory" — by
-walking that directory and stopping at each worktree, then asks git for branch
-and commit only for the entries it is about to print. Same answers, about 50ms
-for a jump.
+here, up from 7.6 seconds when that was last measured in August as worktrees
+accumulated. `gwqcd` walks its three roots instead and stops at each worktree,
+then asks git for branch and commit only for the entries it is about to print.
+Same answers, about **180ms** for a jump — roughly 100ms of discovery, 45ms of
+checking that git, gwq and fzf exist, and 33ms of node starting up.
+
+`--list --json` is the expensive mode, near 870ms, because it pays one
+`git rev-parse` per worktree (sixteen at a time) to fill in every branch and
+commit. Interactive picking resolves metadata only for the one worktree it
+prints.
 
 ## Why `--init` exists
 
@@ -148,8 +153,9 @@ $ gwqcd --list --json --no-main
 ```
 
 `branch` is the real ref name, which the directory slug does not always carry —
-`feat/login` lives in a directory called `feat-login`, and `claude -w` names a
-directory `drifting-giggling-pond` for a branch called `fix/editor-chat`.
+`feat/login` lives in a directory called `feat-login`, and `claude -w` named a
+directory `drifting-giggling-pond` for a branch called
+`fix/editor-chat-domain-guide`.
 
 `source` names the tool whose convention created the worktree. A `claude` or
 `herdr` worktree was handed to another agent session, so `--source gwq` is the
@@ -171,7 +177,7 @@ $ gwqcd --json nope
 | 1 | `E_VALIDATION`, `E_GWQ`, `E_FZF` | bad flags, or an upstream command failed |
 | 2 | `E_NO_MATCH` | no worktrees, or the query matched none |
 | 3 | `E_AMBIGUOUS` | non-interactive with no query — pass one, or use `--list` |
-| 127 | `E_DEPS` | `gwq` or `fzf` not installed |
+| 127 | `E_DEPS` | `git`, `gwq` or `fzf` not installed |
 | 130 | `E_INTERRUPTED` | Esc or Ctrl-C in fzf |
 
 Cancelling the picker exits 130 silently — no error line lands above your next

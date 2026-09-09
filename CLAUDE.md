@@ -11,7 +11,7 @@ of `README.md` instead.
 
 ## What this package does
 
-A small Node.js CLI (~650 lines, zero runtime dependencies) that:
+A small Node.js CLI (~1,090 lines, zero runtime dependencies) that:
 
 1. Finds worktrees by walking three roots — gwq's base directory, the ghq root
    for the `.claude/worktrees` inside its repositories, and `~/.herdr/worktrees`
@@ -102,7 +102,7 @@ With no worktrees, gwq abandons the `--json` contract and prints a plain-text
 sentence. The zsh original coped by piping both gwq and jq through
 `2>/dev/null`, which also swallowed real failures.
 
-`listWorktrees()` keeps the three cases apart:
+`gwqListJson()` keeps the three cases apart:
 
 - exit 0 and output that does not start with `[` → **empty list**
 - exit 0 and output that starts with `[` but does not parse → **`E_GWQ`**, because
@@ -122,13 +122,20 @@ is exactly why gwqcd felt broken next to ghqcd and why it was reported.
 gwq's own rule for `-g` is "all worktrees in the configured base directory", so
 that rule is what is implemented here:
 
+Measured 2026-08-14, on 44 worktrees:
+
 | step | cost |
 | --- | --- |
 | `gwq config get worktree.basedir` (tilde expanded by us) | 41ms |
 | `walkWorktrees()` — prune at the first `.git`, never descend into one | 12ms |
 | `resolveMeta()` — one `git rev-parse` per worktree, 16 at a time | 231ms |
 
-272ms worst case; the interactive path needs no metadata and lands near 50ms.
+272ms worst case; the interactive path needed no metadata and landed near 50ms.
+
+Those are a historical record, kept because they are the argument I7b was
+accepted on. **Do not read them as current.** Re-measured on 2026-09-09 with
+probes inside the binary, `gwq config get` is 11ms rather than 41ms, and a jump
+is about 180ms rather than 50ms — see I7c for the numbers that hold today.
 Verified field-by-field against `gwq list -g --json`: all 43 entries identical
 on branch, commit and isMain. The 44th is a submodule checkout nested inside a
 worktree — its own repository, not somewhere to cd.
@@ -180,34 +187,48 @@ listing. A root that contributes nothing costs one wasted `readdir`.
 `gwq config get` and `ghq root` run concurrently, so the added wall-clock is
 the slower of the two rather than their sum:
 
+Measured inside the real binary with `performance.now()` probes around
+`ensureTool` and `discoverWorktrees`, medians of six `--list` runs against this
+machine's 44 repositories and 128 worktrees:
+
 | step | cost |
 | --- | --- |
-| `gwq config get` ‖ `ghq root` | 45ms |
-| walk `~/ghq`, 44 repositories, 61 directories visited | 9ms |
-| walk the gwq basedir, 115 worktrees | 20ms |
-| walk `~/.herdr/worktrees` | 1ms |
-| **discovery, all three roots** | **75ms** |
+| root resolution, `gwq config get` ‖ `ghq root` | 55ms |
+| the three walks, including the `.claude` peeks | 50ms |
+| **discovery, all three roots** | **102ms** |
+| `ensureTool`, three sequential `--version` spawns | 45ms |
 | for contrast, `gwq list -g --json` **today** | 43,756ms |
 
-That last number was 7,600ms when I7b was written. The slow path has become six
-times worse as worktrees accumulated, which is the strongest argument yet for
-not being on it.
+That last number was 7,600ms when I7b was written on 2026-08-14. The slow path
+became six times worse in under a month as worktrees accumulated, which is the
+strongest argument yet for not being on it.
 
-End to end, measured on 128 worktrees, three runs each:
+End to end, a jump (`--quiet <query>`) is about 180ms. `--list --json`, which
+pays 128 `rev-parse` calls sixteen at a time, is about 870ms. A bare
+`node -e ''` accounts for 33ms of either.
 
-| command | cost |
-| --- | --- |
-| `--list` (discovery only, no metadata) | 212–231ms |
-| `--list --json` (128 `rev-parse`, 16 at a time) | 844–1003ms |
-| bare `node -e ''` for reference | 33ms |
+**Where the time actually goes, and a correction.** An earlier draft of this
+section claimed `ensureTool` dominated at "about 120ms of 220ms" and that
+discovery cost 75ms. Both were wrong, and neither was measured — they were
+inferred by subtracting component timings from a wall-clock total and then
+written down as if probed. Instrumented, the order reverses: discovery is
+97–116ms and `ensureTool` is 42–69ms, in every run. Do not trust a timing in
+this file that did not come from a probe.
 
-**The dominant term in a jump is now `ensureTool`, not discovery.** Three
-sequential `spawnSync(cmd, ['--version'])` calls for git, gwq and fzf cost
-about 120ms of that 220ms, and they predate I7c — adding two roots cost roughly
-50ms of it. Running the three checks concurrently would be the next real win
-here. It is not a free change: the order is what makes the error name the right
-tool (git is checked first for the I1b reason, and there is a test asserting
-that), so the checks may overlap but the *reporting* must stay ordered.
+The biggest single item inside discovery is **`ghq root`, at 52ms alone**,
+against `gwq config get` at 11ms. That is what makes the concurrency worth
+having, and also worth less than it sounds: running the two together saves
+about 8ms, because one of them is nearly free. The real win available here is
+not spawning `ghq root` at all — ghq's own resolution is `$GHQ_ROOT`, then
+`git config --get-all ghq.root`, then `~/ghq`, and reading that cascade
+ourselves costs about 11ms. I7c rejected it on the ground that ghq is the
+authority for its own roots. That trade is worth revisiting if 40ms starts to
+matter.
+
+Making `ensureTool`'s three checks concurrent would save roughly 30ms. It is
+not free either: the order is what makes the error name the right tool (git is
+checked first for the I1b reason, and there is a test asserting that), so the
+checks may overlap but the *reporting* must stay ordered.
 
 **ghq is an optional dependency and must stay out of `ensureTool`.** I1b
 requires git because without it gwq reports zero worktrees to someone who has
@@ -331,7 +352,7 @@ select the line starting with `{`, never parse the whole stream.
 | 1    | `E_FZF`         | fzf could not be run, or exited unexpectedly     |
 | 2    | `E_NO_MATCH`    | no worktrees, or the query matched none          |
 | 3    | `E_AMBIGUOUS`   | non-interactive with no query                    |
-| 127  | `E_DEPS`        | `gwq`/`fzf` missing and user declined install    |
+| 127  | `E_DEPS`        | `git`/`gwq`/`fzf` missing, or install declined   |
 | 130  | `E_INTERRUPTED` | Esc / Ctrl-C                                     |
 
 ### I11. Zero runtime dependencies
