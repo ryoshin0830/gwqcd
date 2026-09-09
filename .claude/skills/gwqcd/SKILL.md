@@ -25,7 +25,7 @@ when_to_use: |
 allowed-tools: Bash
 ---
 
-# gwqcd — resolve a gwq worktree path
+# gwqcd — resolve a git worktree path, whichever tool made it
 
 `gwqcd` finds git worktrees in three places and prints the selected path. With
 `--json` it never opens a UI, so it is safe to call from an agent session.

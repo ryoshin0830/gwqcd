@@ -41,7 +41,7 @@ Teaches the existing walk to find `claude -w` worktrees inside any worktree it a
   - `discoverWorktrees() -> Promise<{ paths: string[], sources: Map<string,string|null>, meta: Map<string,object> }>`
   - Test helpers `realHome()` and `homeShim({ base, ghqRoot, withGhq })`, and `run(args, { shims, cwd, env })`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Replace the whole `── the fast discovery path ──` section of `test/cli.test.mjs` (currently `realBasedir`, `basedirShim` and the five tests that use them) with this. It keeps every existing assertion and adds the new ones.
 
@@ -262,13 +262,13 @@ function run(args, { shims, cwd, env } = {}) {
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `npm test 2>&1 | tail -30`
 
 Expected: FAIL. The `season-amazing-net`, `quizzical-jumping-tome` and `notes` tests fail because nothing peeks into `.claude/worktrees` yet. `EXPECTED` is unused until Task 3, which is fine.
 
-- [ ] **Step 3: Widen the imports**
+- [x] **Step 3: Widen the imports**
 
 In `bin/gwqcd.mjs`, replace the two import lines:
 
@@ -278,7 +278,7 @@ import { homedir } from 'node:os';
 import { join as joinPath, sep } from 'node:path';
 ```
 
-- [ ] **Step 4: Replace `walkWorktrees` with the peeking version**
+- [x] **Step 4: Replace `walkWorktrees` with the peeking version**
 
 Replace the existing `walkWorktrees` function and its comment block with:
 
@@ -339,7 +339,7 @@ function collectClaudeWorktrees(repo, depth, out) {
 }
 ```
 
-- [ ] **Step 5: Move `discoverWorktrees` to records**
+- [x] **Step 5: Move `discoverWorktrees` to records**
 
 Replace the existing `discoverWorktrees` function with the version below. It still walks only the gwq base directory; Tasks 2 and 3 add the other roots.
 
@@ -430,7 +430,7 @@ async function gwqBasedir() {
 }
 ```
 
-- [ ] **Step 6: Update the two call sites in `main`**
+- [x] **Step 6: Update the two call sites in `main`**
 
 In `main`, replace the three lines that read `found` with:
 
@@ -441,13 +441,13 @@ In `main`, replace the three lines that read `found` with:
   let paths = found.paths;
 ```
 
-- [ ] **Step 7: Run the tests to verify they pass**
+- [x] **Step 7: Run the tests to verify they pass**
 
 Run: `npm test 2>&1 | tail -30`
 
 Expected: PASS, all tests. If `--list --json` fails on a missing `source` key, that key does not exist yet — it arrives in Task 4, and no assertion in this task reads it.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add bin/gwqcd.mjs test/cli.test.mjs
@@ -484,7 +484,7 @@ Adds the second root, so `claude -w` worktrees inside main clones are found. The
 - Consumes: `capture`, `expandTilde`, `usableRoots`, `walkWorktrees` from Task 1; the `realHome` / `homeShim` / `runIn` helpers.
 - Produces: `ghqRoots() -> Promise<string[]>`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to the fast-discovery section of `test/cli.test.mjs`:
 
@@ -532,13 +532,13 @@ test('without ghq on PATH the gwq source still returns everything', () => {
 });
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `npm test 2>&1 | tail -30`
 
 Expected: FAIL — the `drifting-giggling-pond` and `agent-aed5fc34` paths are absent because no ghq root is walked yet.
 
-- [ ] **Step 3: Add `ghqRoots`**
+- [x] **Step 3: Add `ghqRoots`**
 
 Insert after `gwqBasedir` in `bin/gwqcd.mjs`:
 
@@ -563,7 +563,7 @@ async function ghqRoots() {
 }
 ```
 
-- [ ] **Step 4: Walk it**
+- [x] **Step 4: Walk it**
 
 In `discoverWorktrees`, replace the two lines that resolve and walk the single root with:
 
@@ -584,13 +584,13 @@ In `discoverWorktrees`, replace the two lines that resolve and walk the single r
   }
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `npm test 2>&1 | tail -30`
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add bin/gwqcd.mjs test/cli.test.mjs
@@ -625,7 +625,7 @@ Adds the third root and locks the full expected set, including herdr's own I8 ca
 - Consumes: everything from Tasks 1 and 2, plus the `EXPECTED` table defined in Task 1.
 - Produces: `herdrRoot() -> string`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to the fast-discovery section:
 
@@ -660,13 +660,13 @@ test('the three roots together yield exactly the expected set', () => {
 });
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `npm test 2>&1 | tail -30`
 
 Expected: FAIL — the `.herdr` path is missing from the list.
 
-- [ ] **Step 3: Add `herdrRoot` and walk it**
+- [x] **Step 3: Add `herdrRoot` and walk it**
 
 Insert after `ghqRoots` in `bin/gwqcd.mjs`:
 
@@ -684,7 +684,7 @@ Then add the third entry to the `usableRoots` call in `discoverWorktrees`, after
     { dir: herdrRoot(), emitAs: 'herdr' },
 ```
 
-- [ ] **Step 4: Say where we looked when nothing is found**
+- [x] **Step 4: Say where we looked when nothing is found**
 
 In `main`, replace the `paths.length === 0` message:
 
@@ -697,13 +697,13 @@ In `main`, replace the `paths.length === 0` message:
   }
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `npm test 2>&1 | tail -30`
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add bin/gwqcd.mjs test/cli.test.mjs
@@ -741,7 +741,7 @@ The user-visible half: the field agents read and the flag humans use to quiet th
   - `let selectedSources: Set<string> | null` — null means every source
   - `shape(path) -> { path, branch, commit, isMain, source }`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to the fast-discovery section:
 
@@ -802,13 +802,13 @@ test('--source with a query that filters everything out is E_NO_MATCH', () => {
 });
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `npm test 2>&1 | tail -30`
 
 Expected: FAIL — `parseArgs` rejects `--source` as an unknown option, and `w.source` is `undefined`.
 
-- [ ] **Step 3: Declare and validate the flag**
+- [x] **Step 3: Declare and validate the flag**
 
 Add to the `parseArgs` options object, after `'no-main'`:
 
@@ -839,7 +839,7 @@ if (values.source != null) {
 }
 ```
 
-- [ ] **Step 4: Label `--local` paths, then filter**
+- [x] **Step 4: Label `--local` paths, then filter**
 
 In `main`, immediately after the `sourceOf` / `paths` assignments and before the `--no-main` block, insert:
 
@@ -887,7 +887,7 @@ function classifySource(path, roots) {
 }
 ```
 
-- [ ] **Step 5: Put `source` in both payloads**
+- [x] **Step 5: Put `source` in both payloads**
 
 Replace the `shape` helper in `main`:
 
@@ -914,7 +914,7 @@ In the `--list --json` writer, replace `worktrees: shown.map((p) => shape(byPath
 
 In the single-selection JSON writer, replace `...shape(picked)` with `...shape(selected)`.
 
-- [ ] **Step 6: Document the flag in `--help`**
+- [x] **Step 6: Document the flag in `--help`**
 
 In `HELP`, add after the `--no-main` line:
 
@@ -942,7 +942,7 @@ And update the two JSON samples in the `OUTPUT` section to carry the field:
     {"schemaVersion":1,"count":2,"worktrees":[{"path":"…","branch":"…","commit":"…","isMain":false,"source":"claude"}]}
 ```
 
-- [ ] **Step 7: Run the tests to verify they pass**
+- [x] **Step 7: Run the tests to verify they pass**
 
 Run: `npm test 2>&1 | tail -30`
 
@@ -958,7 +958,7 @@ Expected: PASS, all tests including the pre-existing `--list --json carries bran
   });
 ```
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add bin/gwqcd.mjs test/cli.test.mjs
@@ -994,7 +994,7 @@ MSG
 - Consumes: `labelLocal`, `classifySource`, the `realHome` fixture.
 - Produces: nothing new.
 
-- [ ] **Step 1: Write the tests**
+- [x] **Step 1: Write the tests**
 
 Append to the fast-discovery section:
 
@@ -1033,13 +1033,13 @@ test('--local --source other is the main clone alone', () => {
 });
 ```
 
-- [ ] **Step 2: Run the tests**
+- [x] **Step 2: Run the tests**
 
 Run: `npm test 2>&1 | tail -30`
 
 Expected: PASS if Task 4's `labelLocal` is correct. If `bySource.gwq` comes back `undefined` and `other` is 2, `classifySource` is not realpath-normalising the base directory — the fixture's home is already a realpath, so compare the two spellings printed by the failure and fix `labelLocal`, not the test.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add test/cli.test.mjs
@@ -1070,7 +1070,7 @@ The interface changed, so every document that states the interface has to change
 - Consumes: the finished behavior from Tasks 1 to 5.
 - Produces: nothing code depends on.
 
-- [ ] **Step 1: Bump the version to 0.3.0**
+- [x] **Step 1: Bump the version to 0.3.0**
 
 A new flag and a new schema field is a minor bump. Edit `package.json` by hand rather than running `npm version`, which would also create a tag pointing at a branch commit:
 
@@ -1080,7 +1080,7 @@ A new flag and a new schema field is a minor bump. Edit `package.json` by hand r
 
 Every push to main releases whatever `package.json` says, so this number is the release this pull request makes.
 
-- [ ] **Step 2: Keep the new docs out of the tarball**
+- [x] **Step 2: Keep the new docs out of the tarball**
 
 Add to `.npmignore`, which is defense in depth behind `files` in `package.json`:
 
@@ -1088,7 +1088,7 @@ Add to `.npmignore`, which is defense in depth behind `files` in `package.json`:
 docs/
 ```
 
-- [ ] **Step 3: Update `README.md`**
+- [x] **Step 3: Update `README.md`**
 
 Add `--source <list>` to the options table with the text `limit to gwq | claude | herdr | other | all (default: all)`. Add a section after the options, before the JSON section:
 
@@ -1115,7 +1115,7 @@ Use `--source gwq` for a picker with no agent worktrees in it.
 
 Add `"source"` to both JSON examples in the README.
 
-- [ ] **Step 4: Update `.claude/skills/gwqcd/SKILL.md`**
+- [x] **Step 4: Update `.claude/skills/gwqcd/SKILL.md`**
 
 Four changes:
 
@@ -1155,7 +1155,7 @@ gwqcd --list --json --source gwq      # no agent worktrees
 gwqcd --list --json --source claude   # only `claude -w` worktrees
 ```
 
-- [ ] **Step 5: Update `CLAUDE.md`**
+- [x] **Step 5: Update `CLAUDE.md`**
 
 Add a new invariant after I7b, and amend three places.
 
@@ -1259,7 +1259,7 @@ Add a row to the manual test matrix:
 | Quiet picker | `gwqcd --source gwq` | no `.claude/worktrees` entries in fzf |
 ```
 
-- [ ] **Step 6: Verify the whole thing**
+- [x] **Step 6: Verify the whole thing**
 
 ```bash
 npm test
@@ -1270,7 +1270,7 @@ node bin/gwqcd.mjs --list --json | node -e 'let s="";process.stdin.on("data",d=>
 
 Expected: tests pass; help renders the new block; `npm pack --dry-run` shows no `docs/`, `.claude/`, `CLAUDE.md` or `test/`; the real machine reports its worktrees grouped by source with a non-zero `claude` count.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add README.md .claude/skills/gwqcd/SKILL.md CLAUDE.md package.json .npmignore
@@ -1300,8 +1300,38 @@ MSG
 
 **Spec coverage.** Sources table → Tasks 1 to 3. Roots table and concurrency → Tasks 1 to 3. `includeRoots`, renamed `emitAs` → Task 2. Fallback preserved → Task 1, with the existing E_GWQ test kept. `--source` flag → Task 4. Schema field → Task 4. Lazy `--local` labelling → Tasks 4 and 5. I8 evidence → Tasks 1 and 3. Performance table → Task 6's I7c. The spec's ten test cases map to: 1 → Task 4's payload test, 2 → Task 3, 3 → Task 2, 4 → Task 1, 5 → Task 1, 6 → Task 4, 7 → Task 4, 8 → Task 1's first-writer-wins map plus Task 3's exact-set test, 9 → Task 3, 10 → Task 2. Both incidental fixes → Task 6.
 
-**Deviation from the spec, deliberate.** The spec described dedup as "a root nested inside a root already walked is skipped". That is wrong: a gwq base directory configured inside the ghq root would be skipped and every gwq worktree would vanish. The plan keeps realpath on the roots and dedups at the output instead, with a first-writer-wins map. Task 1 Step 5 carries the reasoning in a comment. The spec's `usableRoots` behavior is narrowed accordingly.
+**Deviation from the spec, deliberate.** The spec as first drafted described dedup as "a root nested inside a root already walked is skipped". That is wrong: a gwq base directory configured inside the ghq root would be skipped and every gwq worktree would vanish. The plan keeps realpath on the roots and dedups at the output instead, with a first-writer-wins map. Task 1 Step 5 carries the reasoning in a comment. **The spec was edited in the same commit as this plan**, so its Roots section now states the corrected rule and the sentence quoted above no longer appears there — look for it in that commit's diff, not in the file.
 
 **Placeholder scan.** No TBD, no "handle errors appropriately", no "similar to Task N". Every code step carries the code.
 
 **Type consistency.** `emitAs` is the option name in Task 1's `walkWorktrees` and in Tasks 2 and 3's root specs. `sourceOf` is the `Map` name in Task 1 Step 6 and in Task 4's `shape` and filter. `shape` takes a path string in Task 4, which is why Task 4 Step 5 also fixes the two call sites that passed it an object. `labelLocal(paths, into)` is called with `(paths, sourceOf)` in Task 4 Step 4 and defined with that arity in Step 4. `SOURCES` is `['gwq','claude','herdr','other']` in Task 4 and in the error-message assertion, which expects `gwq | claude | herdr | other | all`.
+
+---
+
+## Deviations from this plan, as shipped
+
+Recorded rather than quietly absorbed, because a plan that does not match the
+commits is worse than no plan.
+
+- **Task 1's "an agent that started an agent is found" test moved to Task 2.**
+  The nested agent worktree in the fixture lives under the ghq root, so it is
+  unreachable until that root is walked. The recursion it tests is implemented
+  in Task 1; only the assertion had to move.
+- **Task 2 grew a hermeticity fix that was not planned.** Adding a root that
+  falls back to `~/ghq` made the suite walk the developer's real repositories,
+  through that fallback and through a real `ghq` on `PATH`. `run()` now pins
+  `PATH`, supplies a fresh `HOME`, and drops `GHQ_ROOT`.
+- **Task 2's single "no ghq" test became two.** The planned assertion was
+  wrong: the fixture home *has* a `~/ghq`, so the documented fallback correctly
+  finds it. One test now covers that fallback, another covers no ghq at all.
+- **Task 4 also renamed things the plan did not mention.** "managed by gwq" was
+  no longer true of the tool, so the help header, the emitted function's
+  description and the package description changed with it.
+- **SKILL.md's new section shipped as "An agent worktree is somebody else's
+  workspace"** and carries a source table where the plan prescribed prose.
+- **A seventh task, unplanned:** the fixes from three subagent reviews. Four
+  live bugs (`ghq root --all`, main clones leaking past `emitAs`, the fallback
+  condition, per-chunk Buffer decoding), two suite hermeticity holes, three new
+  root-geometry tests, and a rewrite of every performance number in the
+  documents — those had been inferred rather than measured, with the conclusion
+  backwards. See the spec's closing section and CLAUDE.md I7c through I7e.

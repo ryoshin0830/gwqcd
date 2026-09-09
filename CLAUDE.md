@@ -165,13 +165,33 @@ So discovery walks three roots:
 | root | resolution | `emitAs` |
 | --- | --- | --- |
 | gwq basedir | `gwq config get worktree.basedir` | `gwq` |
-| ghq root | `ghq root`, else `$GHQ_ROOT`, else `~/ghq` | **null** |
+| ghq root | `ghq root --all`, else `$GHQ_ROOT`, else `~/ghq` | **null** |
 | herdr root | `~/.herdr/worktrees` | `herdr` |
+
+**`--all` on `ghq root` is not optional.** Plain `ghq root` prints only the
+*primary* root, so with two `ghq.root` entries configured every agent worktree
+under the second one was invisible — no warning, exit 0. That is the failure
+class I1b exists to prevent, and it shipped in the first cut of I7c because the
+comment claimed multi-root support that only the `$GHQ_ROOT` fallback actually
+had. An ghq too old for the flag exits non-zero, `capture` returns null, and
+the fallbacks take over. There is a test with two roots configured.
 
 `emitAs: null` on the ghq root is load-bearing. That root is walked to find the
 `.claude/worktrees` inside its repositories; emitting the pruned directory
 itself would add 44 main clones to the list and make `gwqcd` a worse `ghqcd`.
 There is a test asserting the main clone does not appear.
+
+**`emitAs` alone does not hold that guarantee, and the fix has to be narrow.**
+If `worktree.basedir` is an ancestor of an ghq root — or the same directory —
+the *gwq* walk reaches those main clones and emits them. Reordering the roots
+cannot help: an `emitAs: null` root records nothing, so it never wins the
+first-writer race. So a pruned directory under a peek-only root is suppressed
+**only when it is a main clone**, which `.git` decides for free: a directory in
+a main clone, a file in a linked worktree. Suppressing everything under the
+root instead is the mistake I7c warns about two paragraphs down — a
+`worktree.basedir` configured *inside* the ghq root holds real gwq worktrees,
+and the broad test deletes all of them. Both directions have tests, and both
+mutations are killed.
 
 The peek happens at the moment of pruning, at every root, and recurses into a
 found worktree's own `.claude/worktrees` because an agent can start an agent.
@@ -182,7 +202,41 @@ Overlap between roots is resolved by a first-writer-wins map keyed by path, and
 deliberately **not** by skipping a root nested inside another. Skipping looks
 tidier and is wrong: a `worktree.basedir` configured under the ghq root is the
 root that would be skipped, and every gwq worktree would vanish from the
-listing. A root that contributes nothing costs one wasted `readdir`.
+listing. A root that contributes nothing costs one wasted `readdir`. There is a
+test for each direction of the overlap and one for the same directory named
+twice.
+
+### I7d. The `gwq list -g --json` fallback supplements; it does not replace
+
+The last resort is reached on exactly one condition: **the gwq base directory
+could not be walked** — gwq would not name it, or it is gone. Two other framings
+were tried and both were silent wrong answers:
+
+- *"fall back when nothing was found at all."* One herdr worktree makes the
+  list non-empty, so a machine whose basedir had vanished lost every gwq
+  worktree and said nothing.
+- *"fall back whenever the gwq walk found nothing."* An empty but walkable
+  basedir is a truthful empty gwq source, and this routes an ordinary machine
+  into the 43-second call.
+
+When it does run, its entries are merged into what the roots already found
+rather than replacing them, first-writer-wins as everywhere else.
+
+Its rows are labelled `gwq` by default rather than `other`: they came out of
+`gwq list -g`, so gwq is where they live even when it would not name the
+directory. Only labels a path can prove on its own override that — the
+`.claude/worktrees` segment, or sitting under the herdr root — because
+`gwq list -g` walks the basedir and therefore reports agent worktrees nested
+inside gwq worktrees too. Labelling those `gwq` contradicted `--help`'s promise
+that `--source gwq` hides agent worktrees.
+
+### I7e. Child stdout is decoded once, not per chunk
+
+`capture()` and `revParse()` collect `Buffer`s and `Buffer.concat` them before
+`toString('utf8')`. `out += d` decodes each chunk independently, so a multi-byte
+character straddling a chunk boundary is replaced with `U+FFFD`. Demonstrated on
+a branch name in Japanese: two characters destroyed in 66KB. Branch names and
+worktree paths are user text; do not reintroduce string concatenation here.
 
 `gwq config get` and `ghq root` run concurrently, so the added wall-clock is
 the slower of the two rather than their sum:

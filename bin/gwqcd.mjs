@@ -29,7 +29,7 @@ OPTIONS
   --query <q>        initial fzf query (same as the positional argument)
   --local            only the current repository's worktrees (default: all)
   --no-main          hide main worktrees, leaving only linked ones
-  --source <list>    limit to gwq | claude | herdr | other | all (default: all)
+  --source <list>    comma-separated: gwq | claude | herdr | other | all (default: all)
   --list             print every candidate instead of picking one
   --json             stdout = 1-line JSON, never opens the fzf UI
   --quiet            stdout = path only (this is what the shell function uses)
@@ -51,8 +51,9 @@ WHERE IT LOOKS
            and inside every worktree found above — what \`claude -w\` creates
   herdr    ~/.herdr/worktrees/<repo>/…
 
-  Repositories outside ghq's root are not searched. ghq itself is optional:
-  without it, the claude source is simply empty.
+  ghq is optional: without it there is no ghq root to search, so only the gwq
+  and herdr roots are peeked for .claude/worktrees. A repository somewhere else
+  entirely, say ~/dev/project, is not searched at all.
 
 WHY --init
   A child process cannot change its parent shell's directory, so \`npx ${PKG}\`
@@ -536,10 +537,14 @@ function capture(cmd, args) {
     } catch {
       return resolve(null);
     }
-    let out = '';
-    child.stdout.on('data', (d) => { out += d; });
+    // Collect Buffers and decode once. `out += d` decodes every chunk on its
+    // own, so a multi-byte character split across a chunk boundary is
+    // destroyed — a branch named in Japanese is not a hypothetical here.
+    const chunks = [];
+    child.stdout.on('data', (d) => chunks.push(d));
     child.on('error', () => resolve(null));
-    child.on('close', (code) => resolve(code === 0 ? out : null));
+    child.on('close', (code) => resolve(
+      code === 0 ? Buffer.concat(chunks).toString('utf8') : null));
   });
 }
 
@@ -562,12 +567,18 @@ async function gwqBasedir() {
 // is not installed at all, and ~/ghq is ghq's own documented default rather
 // than a guess of ours.
 //
+// `root --all` is load-bearing. Plain `ghq root` prints only the *primary*
+// root, so with two `ghq.root` entries configured every agent worktree under
+// the second one was silently invisible — the exact failure class I1b exists to
+// prevent. An ghq too old for the flag exits non-zero, `capture` returns null,
+// and the fallbacks below take over.
+//
 // ghq is deliberately NOT in `ensureTool`. I1b requires git because without it
 // gwq reports zero worktrees to someone who has 44 — a wrong answer delivered
 // silently. Missing ghq is not that: it means there is no ghq tree to search,
 // so this source is empty and every other source returns what it always did.
 async function ghqRoots() {
-  const out = await capture('ghq', ['root']);
+  const out = await capture('ghq', ['root', '--all']);
   if (out != null && out.trim()) {
     return out.trim().split('\n').map((l) => expandTilde(l.trim())).filter(Boolean);
   }
@@ -595,7 +606,7 @@ function herdrRoot() {
 // without emitting it. Null is what keeps main clones out of the results: the
 // ghq root is walked to find what is *inside* its repositories, and a main
 // clone is `ghqcd`'s job, not this tool's.
-function walkWorktrees(dir, { emitAs, depth = 0, out = [] }) {
+function walkWorktrees(dir, { emitAs, peekOnly = [], depth = 0, out = [] }) {
   if (depth > 8) return out;
   let entries;
   try {
@@ -603,17 +614,38 @@ function walkWorktrees(dir, { emitAs, depth = 0, out = [] }) {
   } catch {
     return out; // unreadable or vanished mid-walk
   }
-  if (entries.some((e) => e.name === '.git')) {
-    if (emitAs) out.push({ path: dir, source: emitAs });
+  const dotGit = entries.find((e) => e.name === '.git');
+  if (dotGit) {
+    // `emitAs` alone is not enough. If `worktree.basedir` is an *ancestor* of
+    // an ghq root — or the same directory — this walk reaches the main clones
+    // too, and would emit all 44 of them as gwq worktrees. `peekOnly` carries
+    // the roots whose repositories are to be looked inside but never listed,
+    // which is what holds I7c's "the main clone does not appear". Reordering
+    // the roots cannot fix it: an emitAs-null root records nothing, so it can
+    // never win the first-writer race.
+    //
+    // The test has to be "is this a main clone", not "is this under an ghq
+    // root" — a `worktree.basedir` configured *inside* the ghq root puts real
+    // gwq worktrees under it, and suppressing those is the exact loss I7c
+    // warns about. `.git` is a directory in a main clone and a file in a linked
+    // worktree, which distinguishes them for one Dirent and no syscall.
+    const isMainClone = dotGit.isDirectory();
+    if (emitAs && !(isMainClone && isUnder(dir, peekOnly))) {
+      out.push({ path: dir, source: emitAs });
+    }
     collectClaudeWorktrees(dir, depth, out);
     return out;
   }
   for (const e of entries) {
     if (e.isDirectory() && !e.isSymbolicLink()) {
-      walkWorktrees(joinPath(dir, e.name), { emitAs, depth: depth + 1, out });
+      walkWorktrees(joinPath(dir, e.name), { emitAs, peekOnly, depth: depth + 1, out });
     }
   }
   return out;
+}
+
+function isUnder(path, prefixes) {
+  return prefixes.some((p) => path === p || path.startsWith(p + sep));
 }
 
 // .claude/worktrees can hold anything the agent left behind, so only a
@@ -660,10 +692,11 @@ function revParse(path) {
     } catch {
       return resolve(null);
     }
-    let out = '';
-    child.stdout.on('data', (d) => { out += d; });
+    const chunks = []; // decode once; see capture() for why
+    child.stdout.on('data', (d) => chunks.push(d));
     child.on('error', () => resolve(null));
-    child.on('close', (code) => resolve(code === 0 ? out.trim().split('\n') : null));
+    child.on('close', (code) => resolve(
+      code === 0 ? Buffer.concat(chunks).toString('utf8').trim().split('\n') : null));
   });
 }
 
@@ -701,9 +734,11 @@ function localWorktrees() {
   return out;
 }
 
-// The last-resort path: if gwq will not tell us its base directory, or the
-// directory is gone, fall back to asking gwq itself. Slow but correct, and it
-// keeps exotic configurations working.
+// The last-resort path, reached only when the gwq base directory could not be
+// walked: gwq would not name it, or it is gone. 43 seconds on this machine, so
+// nothing else may route here — an empty but walkable basedir is a truthful
+// empty gwq source. Slow but correct, and it keeps exotic configurations
+// working.
 function gwqListJson(args) {
   const r = spawnSync('gwq', args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   if (r.error) die('E_GWQ', `could not run gwq: ${r.error.message}`);
@@ -745,32 +780,56 @@ async function discoverWorktrees() {
   }
 
   const found = new Map(); // path -> source, first writer wins
+  const meta = new Map();
 
   // The two subprocess lookups are the only slow part of discovery, so they
   // overlap: the added wall-clock is the slower of the two, not their sum.
   const [basedir, ghq] = await Promise.all([gwqBasedir(), ghqRoots()]);
 
-  for (const root of usableRoots([
+  const roots = usableRoots([
     { dir: basedir, emitAs: 'gwq' },
     // emitAs null: walked for the `.claude/worktrees` inside its repositories,
     // never for the repositories themselves.
     ...ghq.map((dir) => ({ dir, emitAs: null })),
     { dir: herdrRoot(), emitAs: 'herdr' },
-  ])) {
-    for (const e of walkWorktrees(root.dir, { emitAs: root.emitAs })) {
+  ]);
+  const peekOnly = roots.filter((r) => !r.emitAs).map((r) => r.dir);
+
+  for (const root of roots) {
+    for (const e of walkWorktrees(root.dir, { emitAs: root.emitAs, peekOnly })) {
       if (!found.has(e.path)) found.set(e.path, e.source);
     }
   }
-  if (found.size) {
-    return { paths: [...found.keys()], sources: found, meta: new Map() };
+
+  // The fallback is reached when the gwq base directory could not be walked at
+  // all — gwq would not name it, or it is gone. An empty but walkable basedir
+  // is a truthful empty gwq source and must NOT drag the 43-second path in.
+  //
+  // It *supplements* rather than replaces: an earlier cut returned only the
+  // fallback's entries, so a machine whose basedir had vanished lost nothing
+  // visibly while a herdr worktree kept the list non-empty and suppressed the
+  // fallback entirely. Both halves of that were silent wrong answers.
+  if (!roots.some((r) => r.emitAs === 'gwq')) {
+    const cls = await sourceRoots(basedir);
+    for (const w of gwqListJson(['list', '-g', '--json'])) {
+      if (found.has(w.path)) continue;
+      // `gwq list -g` walks the basedir, so a `claude -w` worktree living
+      // inside a gwq worktree is in its output too. Labelling the lot `gwq`
+      // contradicted `--help`'s promise that `--source gwq` hides agent
+      // worktrees.
+      //
+      // `gwq` is the right default here rather than `other`: these came out of
+      // `gwq list -g`, so gwq is where they live even when it would not tell us
+      // the directory. Only the labels a path can prove on its own — the
+      // `.claude/worktrees` segment, or sitting under the herdr root — override
+      // it.
+      const src = classifySource(w.path, cls);
+      found.set(w.path, src === 'other' ? 'gwq' : src);
+      meta.set(w.path, w);
+    }
   }
 
-  const list = gwqListJson(['list', '-g', '--json']);
-  return {
-    paths: list.map((w) => w.path),
-    sources: new Map(list.map((w) => [w.path, 'gwq'])),
-    meta: new Map(list.map((w) => [w.path, w])),
-  };
+  return { paths: [...found.keys()], sources: found, meta };
 }
 
 // Each root is resolved through realpath so every path built from it is spelled
@@ -789,16 +848,23 @@ function usableRoots(specs) {
   return out;
 }
 
+// The prefixes a path can be recognised by, for the two callers that have only
+// a path and no idea which walk produced it.
+async function sourceRoots(basedir) {
+  const dirs = basedir === undefined ? await gwqBasedir() : basedir;
+  const roots = [];
+  for (const [dir, source] of [[dirs, 'gwq'], [herdrRoot(), 'herdr']]) {
+    if (!dir) continue;
+    try { roots.push([realpathSync(dir), source]); } catch { /* not a root */ }
+  }
+  return roots;
+}
+
 // git reports paths, not provenance, so a --local listing has to recognise the
 // roots by shape. The .claude test and the herdr root are free; the gwq label
 // is the one that costs a subprocess, which is why the caller gates this.
 async function labelLocal(paths, into) {
-  const basedir = await gwqBasedir();
-  const roots = [];
-  for (const [dir, source] of [[basedir, 'gwq'], [herdrRoot(), 'herdr']]) {
-    if (!dir) continue;
-    try { roots.push([realpathSync(dir), source]); } catch { /* not a root */ }
-  }
+  const roots = await sourceRoots(undefined);
   for (const p of paths) into.set(p, classifySource(p, roots));
 }
 

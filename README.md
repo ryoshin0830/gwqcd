@@ -67,6 +67,10 @@ and Node >= 20.12. **No `jq`.** `ghq` is optional — see below.
 | `gwq` | `gwq config get worktree.basedir` | `gwq add` |
 | `claude` | `<repo>/.claude/worktrees/<slug>` | `claude -w` |
 | `herdr` | `~/.herdr/worktrees/<repo>/<slug>` | `herdr worktree create` |
+| `other` | anywhere else | only ever seen with `--local` |
+
+`--source` takes a comma-separated list, so `--source claude,herdr` is every
+agent worktree and nothing else.
 
 `claude -w` puts its worktree *inside* the repository it belongs to, so `gwqcd`
 looks inside every repository under `ghq root` — and inside every worktree it
@@ -74,9 +78,10 @@ already found, because an agent can start an agent. It never descends into a
 repository past that one directory, which is what keeps the three walks at
 about 50ms across 44 repositories and 128 worktrees.
 
-`ghq` is optional. Without it there is no ghq root to search and the `claude`
-source is empty; every other source is unaffected. Repositories outside ghq's
-root are not searched.
+`ghq` is optional. Without it there is no ghq root to search, so agent
+worktrees are still found inside anything under the gwq base directory or the
+herdr root — just not inside your main clones. A repository somewhere else
+entirely, say `~/dev/project`, is not searched at all.
 
 `--source gwq` gives you a picker with no agent worktrees in it.
 
@@ -129,7 +134,7 @@ gwqcd [options] [<query>]
 | `--query <q>` | initial fzf query (same as the positional) |
 | `--local` | only the current repository's worktrees (default: all) |
 | `--no-main` | hide main worktrees, leaving only linked ones |
-| `--source <list>` | limit to `gwq` \| `claude` \| `herdr` \| `other` \| `all` (default: `all`) |
+| `--source <list>` | comma-separated `gwq` \| `claude` \| `herdr` \| `other` \| `all` (default: `all`) |
 | `--list` | print every candidate instead of picking one |
 | `--json` | stdout = 1-line JSON, never opens the fzf UI |
 | `--quiet` | stdout = path only |

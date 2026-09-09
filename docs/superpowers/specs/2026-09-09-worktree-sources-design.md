@@ -238,7 +238,7 @@ authority grounds. That is the trade to revisit, not `ensureTool`.
 ## Testing
 
 The shim-based suite grows a real fixture rather than more shims, because the
-peek, the pruning and the `includeRoots` distinction are all filesystem
+peek, the pruning and the `emitAs` distinction are all filesystem
 behavior that a shim cannot express.
 
 The fixture builds a real repository with a real linked worktree under each of
@@ -286,3 +286,44 @@ Two real bugs in files this work already touches:
   to `^0.3`.
 - `.claude/worktrees/` is not in `.gitignore`, so every `claude -w` worktree
   shows up as untracked in `git status` in this repository. Added.
+
+## What review found after this was written
+
+Three subagent reviews went over the implementation, the suite and these
+documents. They are recorded here because four of the findings were live bugs
+in the first cut, and the reasoning behind each fix now lives in CLAUDE.md.
+
+**`ghq root` returns only the primary root.** The design said ghq "supports
+multiple roots and reads them from three places" and then called plain
+`ghq root`, which prints one. With two `ghq.root` entries configured, every
+agent worktree under the second was invisible, silently, exit 0 — the I1b
+failure class. Fixed to `ghq root --all`; see I7c.
+
+**`emitAs: null` did not actually keep main clones out.** With a
+`worktree.basedir` that is an ancestor of an ghq root, the gwq walk reaches the
+main clones and emitted all of them. The first fix suppressed everything under
+a peek-only root, which then deleted the real gwq worktrees of a basedir nested
+*inside* the ghq root — precisely the loss the Roots section above warns about.
+The narrow test is whether `.git` is a directory (main clone) or a file (linked
+worktree); see I7c.
+
+**The fallback condition was wrong twice over.** "All three roots yield
+nothing" means one herdr worktree hides a vanished gwq basedir and loses every
+gwq worktree; "the gwq walk found nothing" routes an ordinary empty basedir
+into the 43-second call. It is now "the gwq basedir could not be walked", and
+its rows are merged rather than substituted; see I7d.
+
+**Child stdout was decoded per chunk.** `out += buffer` in `capture` and
+`revParse` destroys a multi-byte character that straddles a chunk boundary,
+demonstrated on a Japanese branch name. See I7e.
+
+The suite grew from 58 to 64 tests. Three of the new ones exist because review
+showed that two natural implementations of the overlap mistake, and the removal
+of the `$GHQ_ROOT` branch, all passed the original 58. The suite also had two
+hermeticity holes of its own: the fixture builder ran git under the developer's
+real `HOME` and gitconfig, and the shell-function tests resolved whatever
+`gwqcd` was installed globally rather than the code under review.
+
+The performance section above was rewritten for the same reason — the numbers
+in the first draft were inferred, not measured, and had the conclusion
+backwards.
