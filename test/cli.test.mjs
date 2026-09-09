@@ -573,6 +573,35 @@ test('no ghq at all leaves the gwq source untouched and does not exit 127', () =
   assert.doesNotMatch(out, /ghq\/host\/owner\/repo\/\.claude/, 'no ghq root to search');
 });
 
+test('herdr worktrees are found under ~/.herdr/worktrees', () => {
+  const fx = realHome();
+  const r = runIn(fx, ['--list']);
+  const out = r.stdout;
+  rmSync(fx.home, { recursive: true, force: true });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(out.includes(join(fx.home, '.herdr/worktrees/repo/worktree-brave-meadow-2b28')), out);
+});
+
+test("herdr's directory slug is not its branch name", () => {
+  // Directory worktree-brave-meadow-2b28, branch worktree/brave-meadow-2b28.
+  // The slash is flattened to a dash, which is I8 re-run on a second tool.
+  const fx = realHome();
+  const r = runIn(fx, ['--list', '--json']);
+  const out = JSON.parse(r.stdout);
+  rmSync(fx.home, { recursive: true, force: true });
+  const w = out.worktrees.find((x) => x.path.includes('.herdr'));
+  assert.equal(w.branch, 'worktree/brave-meadow-2b28');
+});
+
+test('the three roots together yield exactly the expected set', () => {
+  const fx = realHome();
+  const r = runIn(fx, ['--list']);
+  const got = r.stdout.trim().split('\n').sort();
+  rmSync(fx.home, { recursive: true, force: true });
+  const want = EXPECTED.map(([rel]) => join(fx.home, rel)).sort();
+  assert.deepEqual(got, want);
+});
+
 // ── the emitted function, actually run ───────────────────────────────────────
 //
 // A syntax check never caught this: with the function installed, every flag

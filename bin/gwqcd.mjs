@@ -543,6 +543,12 @@ async function ghqRoots() {
   return [joinPath(homedir(), 'ghq')];
 }
 
+// herdr exposes no setting for this directory, so the convention is the
+// contract. If it ever grows one, this becomes a one-line change.
+function herdrRoot() {
+  return joinPath(homedir(), '.herdr', 'worktrees');
+}
+
 // Prune at the worktree. Descending into one means walking node_modules and
 // vendor trees, which is where gwq's own 43 seconds go.
 //
@@ -716,6 +722,7 @@ async function discoverWorktrees() {
     // emitAs null: walked for the `.claude/worktrees` inside its repositories,
     // never for the repositories themselves.
     ...ghq.map((dir) => ({ dir, emitAs: null })),
+    { dir: herdrRoot(), emitAs: 'herdr' },
   ])) {
     for (const e of walkWorktrees(root.dir, { emitAs: root.emitAs })) {
       if (!found.has(e.path)) found.set(e.path, e.source);
@@ -903,7 +910,8 @@ async function main() {
   if (paths.length === 0) {
     die('E_NO_MATCH', values.local
       ? 'this repository has no worktrees. Create one with `gwq add <branch>`.'
-      : 'gwq knows about no worktrees. Create one with `gwq add <branch>`.');
+      : "no worktrees found under gwq's base directory, ~/.herdr/worktrees, or "
+        + 'any .claude/worktrees below the ghq root. Create one with `gwq add <branch>`.');
   }
 
   // fzf matches on the path, exactly as the original shell function did — the
