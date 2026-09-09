@@ -79,9 +79,9 @@ their sum.
 | ghq root    | `ghq root`; failing that `$GHQ_ROOT` split on `:`; failing that `~/ghq` | 52ms |
 | herdr root  | `~/.herdr/worktrees`                                                   | 0    |
 
-Concurrency buys less here than the framing suggests: 55ms together against
-63ms in sequence, because the gwq lookup is nearly free. It is still the right
-shape, and it costs nothing.
+Concurrency buys less here than the framing suggests: about 44ms together
+against roughly 61ms in sequence, because the gwq lookup is nearly free. It is
+still the right shape, and it costs nothing.
 
 Roots that do not exist are dropped, and each one is resolved through
 `realpath` before the walk so every path built from it is spelled one way.
@@ -214,15 +214,19 @@ These were the design-time estimates, taken from a standalone harness:
 
 | step                                            | measured  |
 | ----------------------------------------------- | --------- |
-| root resolution, concurrent                     | 55ms      |
-| the three walks, including the `.claude` peeks  | 50ms      |
-| **discovery, all three roots**                  | **102ms** |
-| `ensureTool`, three `--version` spawns          | 45ms      |
-| a jump, `--quiet <query>`, end to end           | 180ms     |
-| `--list --json`, 128 `rev-parse` 16 at a time   | 870ms     |
+| root resolution, concurrent                     | 44ms      |
+| the three walks, including the `.claude` peeks  | 42ms      |
+| **discovery, all three roots**                  | **94ms**  |
+| `ensureTool`, three `--version` spawns          | 38ms      |
+| a jump, `--quiet <query>`, end to end           | 150ms     |
+| `--list --json`, one `rev-parse` each, 16 at a time | 640ms |
 
-The estimates understated the walks by 20ms, because the standalone harness ran
-with a warm cache and without the `existsSync` peek per candidate. The larger
+(Re-measured after the review fixes. Dropping the eager main-clone read and
+pruning bare repositories moved a jump from 180ms to 150ms.)
+
+The estimates understated the walks — 30ms against 42ms measured — because the
+standalone harness ran with a warm cache and without the `existsSync` peek per
+candidate. The larger
 mistake was a claim this document made and CLAUDE.md repeated: that
 `ensureTool` dominated a jump at "about 120ms of 220ms". That figure was never
 probed — it was the remainder after subtracting the estimates from a wall clock,

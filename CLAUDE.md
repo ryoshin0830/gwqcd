@@ -135,7 +135,7 @@ Measured 2026-08-14, on 44 worktrees:
 Those are a historical record, kept because they are the argument I7b was
 accepted on. **Do not read them as current.** Re-measured on 2026-09-09 with
 probes inside the binary, `gwq config get` is 11ms rather than 41ms, and a jump
-is about 180ms rather than 50ms — see I7c for the numbers that hold today.
+is about 150ms rather than 50ms — see I7c for the numbers that hold today.
 Verified field-by-field against `gwq list -g --json`: all 43 entries identical
 on branch, commit and isMain. The 44th is a submodule checkout nested inside a
 worktree — its own repository, not somewhere to cd.
@@ -303,30 +303,35 @@ machine's 44 repositories and 128 worktrees:
 
 | step | cost |
 | --- | --- |
-| root resolution, `gwq config get` ‖ `ghq root` | 55ms |
-| the three walks, including the `.claude` peeks | 50ms |
-| **discovery, all three roots** | **102ms** |
-| `ensureTool`, three sequential `--version` spawns | 45ms |
+| root resolution, `gwq config get` ‖ `ghq root --all` | 44ms |
+| the three walks, including the `.claude` peeks | 42ms |
+| **discovery, all three roots** | **94ms** |
+| `ensureTool`, three sequential `--version` spawns | 38ms |
 | for contrast, `gwq list -g --json` **today** | 43,756ms |
 
 That last number was 7,600ms when I7b was written on 2026-08-14. The slow path
 became six times worse in under a month as worktrees accumulated, which is the
 strongest argument yet for not being on it.
 
-End to end, a jump (`--quiet <query>`) is about 180ms. `--list --json`, which
-pays 128 `rev-parse` calls sixteen at a time, is about 870ms. A bare
+End to end, a jump (`--quiet <query>`) is about 150ms. `--list --json`, which
+pays one `rev-parse` per worktree sixteen at a time, is about 640ms. A bare
 `node -e ''` accounts for 33ms of either.
+
+Those are post-review figures, on 129 worktrees. Dropping the eager main-clone
+read and pruning bare repositories took a jump from 180ms to 150ms and
+`--list --json` from 870ms to 640ms; the earlier numbers are in this file's
+history if the comparison ever matters.
 
 **Where the time actually goes, and a correction.** An earlier draft of this
 section claimed `ensureTool` dominated at "about 120ms of 220ms" and that
 discovery cost 75ms. Both were wrong, and neither was measured — they were
 inferred by subtracting component timings from a wall-clock total and then
 written down as if probed. Instrumented, the order reverses: discovery is
-97–116ms and `ensureTool` is 42–69ms, in every run. Do not trust a timing in
-this file that did not come from a probe.
+80–98ms and `ensureTool` is 36–71ms, in every run of every version since. Do
+not trust a timing in this file that did not come from a probe.
 
-The biggest single item inside discovery is **`ghq root`, at 52ms alone**,
-against `gwq config get` at 11ms. That is what makes the concurrency worth
+The biggest single item inside discovery is **`ghq root --all`, at ~50ms
+alone**, against `gwq config get` at 11ms. That is what makes the concurrency worth
 having, and also worth less than it sounds: running the two together saves
 about 8ms, because one of them is nearly free. The real win available here is
 not spawning `ghq root` at all — ghq's own resolution is `$GHQ_ROOT`, then

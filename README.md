@@ -76,7 +76,7 @@ agent worktree and nothing else.
 looks inside every repository under `ghq root` — and inside every worktree it
 already found, because an agent can start an agent. It never descends into a
 repository past that one directory, which is what keeps the three walks at
-about 50ms across 44 repositories and 128 worktrees.
+about 42ms across 44 repositories and 129 worktrees.
 
 `ghq` is optional. Without it there is no ghq root to search, so agent
 worktrees are still found inside anything under the gwq base directory or the
@@ -92,10 +92,10 @@ directory, including files inside worktrees: **43.7 seconds** on 115 worktrees
 here, up from 7.6 seconds when that was last measured in August as worktrees
 accumulated. `gwqcd` walks its three roots instead and stops at each worktree,
 then asks git for branch and commit only for the entries it is about to print.
-Same answers, about **180ms** for a jump — roughly 100ms of discovery, 45ms of
+Same answers, about **150ms** for a jump — roughly 94ms of discovery, 38ms of
 checking that git, gwq and fzf exist, and 33ms of node starting up.
 
-`--list --json` is the expensive mode, near 870ms, because it pays one
+`--list --json` is the expensive mode, near 640ms, because it pays one
 `git rev-parse` per worktree (sixteen at a time) to fill in every branch and
 commit. Interactive picking resolves metadata only for the one worktree it
 prints.
