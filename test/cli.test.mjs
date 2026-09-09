@@ -658,6 +658,39 @@ test('--source with a query that filters everything out is E_NO_MATCH', () => {
   assert.equal(jsonLine(r.stderr).error.code, 'E_NO_MATCH');
 });
 
+test('--local labels the sources it can see', () => {
+  // git reports every worktree of the repository, agent ones included, and has
+  // always done so. Now the listing says which is which.
+  const fx = realHome();
+  const shims = homeShim({ base: fx.base, ghqRoot: fx.ghqRoot });
+  const r = run(['--local', '--list', '--json'], {
+    shims, cwd: fx.repo, env: { HOME: fx.home },
+  });
+  rmSync(shims, { recursive: true, force: true });
+  const out = JSON.parse(r.stdout);
+  rmSync(fx.home, { recursive: true, force: true });
+  const bySource = {};
+  for (const w of out.worktrees) bySource[w.source] = (bySource[w.source] ?? 0) + 1;
+  // the main clone is `other`; the gwq worktree is `gwq`; the herdr one is
+  // `herdr`; the four .claude ones are `claude`.
+  assert.equal(bySource.other, 1, JSON.stringify(out.worktrees, null, 2));
+  assert.equal(bySource.gwq, 1);
+  assert.equal(bySource.herdr, 1);
+  assert.equal(bySource.claude, 4);
+});
+
+test('--local --source other is the main clone alone', () => {
+  const fx = realHome();
+  const shims = homeShim({ base: fx.base, ghqRoot: fx.ghqRoot });
+  const r = run(['--local', '--list', '--source', 'other'], {
+    shims, cwd: fx.repo, env: { HOME: fx.home },
+  });
+  rmSync(shims, { recursive: true, force: true });
+  const lines = r.stdout.trim().split('\n');
+  rmSync(fx.home, { recursive: true, force: true });
+  assert.deepEqual(lines, [fx.repo]);
+});
+
 // ── the emitted function, actually run ───────────────────────────────────────
 //
 // A syntax check never caught this: with the function installed, every flag
