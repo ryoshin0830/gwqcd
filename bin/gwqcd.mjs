@@ -2,9 +2,9 @@
 import { spawnSync, spawn } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { Buffer } from 'node:buffer';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join as joinPath } from 'node:path';
+import { join as joinPath, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // Read from package.json rather than a hand-maintained constant: `npm version`
@@ -492,20 +492,52 @@ async function confirmYesNo(question) {
 // The one entry this drops that gwq reported is a submodule checkout nested
 // inside a worktree — its own repository, not a worktree anyone wants to cd to.
 
-function gwqBasedir() {
-  const r = spawnSync('gwq', ['config', 'get', 'worktree.basedir'], { encoding: 'utf8' });
-  if (r.status !== 0) return '';
-  let v = (r.stdout ?? '').trim().split('\n')[0]?.trim() ?? '';
+// Async because `ghq root` runs alongside it: these two subprocesses are the
+// only slow part of discovery, and overlapping them makes the added wall-clock
+// the slower of the two rather than their sum.
+function capture(cmd, args) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch {
+      return resolve(null);
+    }
+    let out = '';
+    child.stdout.on('data', (d) => { out += d; });
+    child.on('error', () => resolve(null));
+    child.on('close', (code) => resolve(code === 0 ? out : null));
+  });
+}
+
+// gwq stores the tilde literally; it expands it, so we must too.
+function expandTilde(v) {
   if (!v) return '';
-  // gwq stores the tilde literally; it expands it, so we must too.
   if (v === '~') return homedir();
-  if (v.startsWith('~/')) v = joinPath(homedir(), v.slice(2));
+  if (v.startsWith('~/')) return joinPath(homedir(), v.slice(2));
   return v;
 }
 
+async function gwqBasedir() {
+  const out = await capture('gwq', ['config', 'get', 'worktree.basedir']);
+  if (out == null) return '';
+  return expandTilde(out.trim().split('\n')[0]?.trim() ?? '');
+}
+
 // Prune at the worktree. Descending into one means walking node_modules and
-// vendor trees, which is where gwq's own second-plus goes.
-function walkWorktrees(dir, depth = 0, out = []) {
+// vendor trees, which is where gwq's own 43 seconds go.
+//
+// `claude -w` puts its worktree *inside* the repository, at
+// .claude/worktrees/<slug> — precisely the place this walk refuses to enter. So
+// at the moment of pruning, and only then, peek at that one directory. One
+// readdir per repository, no descent, 9ms for the whole of a 44-repository ghq
+// root.
+//
+// `emitAs` is the source to label the pruned directory with, or null to peek
+// without emitting it. Null is what keeps main clones out of the results: the
+// ghq root is walked to find what is *inside* its repositories, and a main
+// clone is `ghqcd`'s job, not this tool's.
+function walkWorktrees(dir, { emitAs, depth = 0, out = [] }) {
   if (depth > 8) return out;
   let entries;
   try {
@@ -514,13 +546,37 @@ function walkWorktrees(dir, depth = 0, out = []) {
     return out; // unreadable or vanished mid-walk
   }
   if (entries.some((e) => e.name === '.git')) {
-    out.push(dir);
+    if (emitAs) out.push({ path: dir, source: emitAs });
+    collectClaudeWorktrees(dir, depth, out);
     return out;
   }
   for (const e of entries) {
-    if (e.isDirectory() && !e.isSymbolicLink()) walkWorktrees(joinPath(dir, e.name), depth + 1, out);
+    if (e.isDirectory() && !e.isSymbolicLink()) {
+      walkWorktrees(joinPath(dir, e.name), { emitAs, depth: depth + 1, out });
+    }
   }
   return out;
+}
+
+// .claude/worktrees can hold anything the agent left behind, so only a
+// directory with a `.git` of its own counts. Recurses because an agent can
+// start an agent, under the same depth guard as the walk.
+function collectClaudeWorktrees(repo, depth, out) {
+  if (depth > 8) return;
+  const base = joinPath(repo, '.claude', 'worktrees');
+  let entries;
+  try {
+    entries = readdirSync(base, { withFileTypes: true });
+  } catch {
+    return; // the common case by far: this repository has no agent worktrees
+  }
+  for (const e of entries) {
+    if (!e.isDirectory() || e.isSymbolicLink()) continue;
+    const wt = joinPath(base, e.name);
+    if (!existsSync(joinPath(wt, '.git'))) continue;
+    out.push({ path: wt, source: 'claude' });
+    collectClaudeWorktrees(wt, depth + 1, out);
+  }
 }
 
 // One git call per worktree yields all three fields at once. `--git-dir` is the
@@ -616,20 +672,53 @@ function gwqListJson(args) {
     }));
 }
 
-// Returns { paths, meta } where meta is a Map that may start empty: filling it
-// costs a git call per worktree, so callers ask for only what they print.
-function discoverWorktrees() {
+// Returns { paths, sources, meta }. `sources` maps a path to the tool whose
+// convention put it there, or null when it is not known yet (--local learns it
+// lazily, in labelLocal). `meta` may start empty: filling it costs a git call
+// per worktree, so callers ask for only what they print.
+async function discoverWorktrees() {
   if (values.local) {
     const list = localWorktrees();
-    return { paths: list.map((w) => w.path), meta: new Map(list.map((w) => [w.path, w])) };
+    return {
+      paths: list.map((w) => w.path),
+      sources: new Map(list.map((w) => [w.path, null])),
+      meta: new Map(list.map((w) => [w.path, w])),
+    };
   }
-  const basedir = gwqBasedir();
-  if (basedir) {
-    const paths = walkWorktrees(basedir);
-    if (paths.length) return { paths, meta: new Map() };
+
+  const found = new Map(); // path -> source, first writer wins
+  const basedir = await gwqBasedir();
+  for (const root of usableRoots([{ dir: basedir, emitAs: 'gwq' }])) {
+    for (const e of walkWorktrees(root.dir, { emitAs: root.emitAs })) {
+      if (!found.has(e.path)) found.set(e.path, e.source);
+    }
   }
+  if (found.size) {
+    return { paths: [...found.keys()], sources: found, meta: new Map() };
+  }
+
   const list = gwqListJson(['list', '-g', '--json']);
-  return { paths: list.map((w) => w.path), meta: new Map(list.map((w) => [w.path, w])) };
+  return {
+    paths: list.map((w) => w.path),
+    sources: new Map(list.map((w) => [w.path, 'gwq'])),
+    meta: new Map(list.map((w) => [w.path, w])),
+  };
+}
+
+// Each root is resolved through realpath so every path built from it is spelled
+// one way, and roots that do not exist are dropped. Overlap between roots is
+// handled where it actually shows up — by the first-writer-wins map above —
+// rather than by dropping a root nested inside another, which would drop a
+// worktree.basedir configured under the ghq root and lose every gwq worktree.
+function usableRoots(specs) {
+  const out = [];
+  for (const { dir, emitAs } of specs) {
+    if (!dir) continue;
+    try {
+      out.push({ dir: realpathSync(dir), emitAs });
+    } catch { /* absent or unreadable: not a root */ }
+  }
+  return out;
 }
 
 // ── fzf ──────────────────────────────────────────────────────────────────────
@@ -771,8 +860,9 @@ async function main() {
   await ensureTool('gwq');
   await ensureTool('fzf');
 
-  const found = discoverWorktrees();
+  const found = await discoverWorktrees();
   const byPath = found.meta;
+  const sourceOf = found.sources;
   let paths = found.paths;
 
   // Only --no-main needs every entry's metadata up front; everything else

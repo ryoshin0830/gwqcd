@@ -51,9 +51,9 @@ exit 2
   return dir;
 }
 
-function run(args, { shims, cwd } = {}) {
+function run(args, { shims, cwd, env } = {}) {
   const dir = shims ?? makeShims();
-  const childEnv = { ...process.env, PATH: `${dir}:${process.env.PATH}`, NO_COLOR: '1' };
+  const childEnv = { ...process.env, PATH: `${dir}:${process.env.PATH}`, NO_COLOR: '1', ...env };
   // We force NO_COLOR; node itself warns to stderr when FORCE_COLOR is also
   // set, so a developer who exports it would otherwise see phantom failures.
   delete childEnv.FORCE_COLOR;
@@ -303,106 +303,187 @@ test('a missing git exits 127 — gwq shells out to it', () => {
 
 // ── the fast discovery path ──────────────────────────────────────────────────
 //
-// `gwq list -g` took 7.6 seconds on 44 worktrees; walking gwq's base directory
-// takes 12ms. These tests use a real basedir with real worktrees, because the
-// walk, the pruning and the metadata all come from the filesystem and git.
+// `gwq list -g` took 43.7 seconds on this machine's 115 worktrees; walking the
+// roots takes 30ms. These tests build a real home with real repositories,
+// because the walk, the pruning, the .claude peek and the metadata all come
+// from the filesystem and from git — a shim cannot express any of it.
+//
+// Layout, and what must come out of it:
+//
+//   $HOME/ghq/host/owner/repo                     main clone  — NOT listed
+//     .claude/worktrees/drifting-giggling-pond    claude      — listed
+//       .claude/worktrees/quizzical-jumping-tome  claude      — listed (nested)
+//     .claude/worktrees/agent-aed5fc34            claude      — listed, detached
+//     .claude/worktrees/notes                     no .git     — NOT listed
+//   $HOME/worktrees/host/owner/repo/feat-one      gwq         — listed
+//     .claude/worktrees/season-amazing-net        claude      — listed
+//     vendor/dep                                  nested repo — NOT listed
+//   $HOME/.herdr/worktrees/repo/worktree-brave-meadow-2b28
+//                                                 herdr       — listed
 
-function realBasedir() {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'gwqcd-base-')));
-  const repo = join(root, 'repo');
-  const base = join(root, 'worktrees');
-  mkdirSync(repo); mkdirSync(base);
+function realHome() {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'gwqcd-home-')));
+  const ghqRoot = join(home, 'ghq');
+  const base = join(home, 'worktrees');
+  const repo = join(ghqRoot, 'host', 'owner', 'repo');
   const g = (cwd, ...a) => {
     const r = spawnSync('git', a, { cwd, encoding: 'utf8' });
     if (r.status !== 0) throw new Error(`git ${a.join(' ')}: ${r.stderr}`);
     return (r.stdout ?? '').trim();
   };
+
+  mkdirSync(repo, { recursive: true });
+  mkdirSync(base, { recursive: true });
   g(repo, 'init', '-q', '-b', 'main');
   g(repo, 'config', 'user.email', 't@e.com');
   g(repo, 'config', 'user.name', 'T');
   writeFileSync(join(repo, 'a.txt'), 'x\n');
-  g(repo, 'add', '-A'); g(repo, 'commit', '-qm', 'init');
-  // Two linked worktrees under the basedir, one nested in a subdirectory the
-  // way gwq's template produces.
-  mkdirSync(join(base, 'host', 'owner', 'repo'), { recursive: true });
-  g(repo, 'worktree', 'add', '-q', '-b', 'feat/one', join(base, 'host', 'owner', 'repo', 'feat-one'));
-  g(repo, 'worktree', 'add', '-q', '-b', 'feat/two', join(base, 'host', 'owner', 'repo', 'feat-two'));
-  // A decoy that must not be walked into: files inside a worktree, including a
-  // nested repository of its own. gwq reports these; they are not worktrees.
-  const nested = join(base, 'host', 'owner', 'repo', 'feat-one', 'vendor', 'dep');
+  g(repo, 'add', '-A');
+  g(repo, 'commit', '-qm', 'init');
+
+  // gwq's layout: nested under host/owner/repo the way its template produces.
+  const wtDir = join(base, 'host', 'owner', 'repo');
+  mkdirSync(wtDir, { recursive: true });
+  const gwqOne = join(wtDir, 'feat-one');
+  g(repo, 'worktree', 'add', '-q', '-b', 'feat/one', gwqOne);
+
+  // The decoy that must not be walked into: files inside a worktree, including
+  // a repository of its own. gwq reports these; they are not worktrees.
+  const nested = join(gwqOne, 'vendor', 'dep');
   mkdirSync(nested, { recursive: true });
   g(nested, 'init', '-q', '-b', 'main');
-  return { root, repo, base, sha: g(repo, 'rev-parse', 'HEAD') };
+
+  // `claude -w` inside a gwq worktree — the peek has to happen at every root,
+  // not only under ghq.
+  mkdirSync(join(gwqOne, '.claude', 'worktrees'), { recursive: true });
+  g(repo, 'worktree', 'add', '-q', '-b', 'season-amazing-net',
+    join(gwqOne, '.claude', 'worktrees', 'season-amazing-net'));
+
+  // `claude -w` inside the main clone, which is where it normally lands.
+  const cw = join(repo, '.claude', 'worktrees');
+  mkdirSync(cw, { recursive: true });
+  // The I8 case, verified against a real one: the directory says
+  // drifting-giggling-pond and the branch says fix/editor-chat-domain-guide.
+  g(repo, 'worktree', 'add', '-q', '-b', 'fix/editor-chat-domain-guide',
+    join(cw, 'drifting-giggling-pond'));
+  // A real `agent-…` worktree observed on a detached HEAD, so branch is ''.
+  g(repo, 'worktree', 'add', '-q', '--detach', join(cw, 'agent-aed5fc34'));
+  // Junk in .claude/worktrees is not a worktree.
+  mkdirSync(join(cw, 'notes'), { recursive: true });
+  writeFileSync(join(cw, 'notes', 'scratch.md'), '# not a worktree\n');
+  // An agent can start an agent.
+  mkdirSync(join(cw, 'drifting-giggling-pond', '.claude', 'worktrees'), { recursive: true });
+  g(repo, 'worktree', 'add', '-q', '-b', 'sub/agent',
+    join(cw, 'drifting-giggling-pond', '.claude', 'worktrees', 'quizzical-jumping-tome'));
+
+  // herdr: ~/.herdr/worktrees/<repo>/<slug>. The slug flattens the slash, so
+  // this is the I8 case again on a second tool.
+  const herdr = join(home, '.herdr', 'worktrees', 'repo');
+  mkdirSync(herdr, { recursive: true });
+  g(repo, 'worktree', 'add', '-q', '-b', 'worktree/brave-meadow-2b28',
+    join(herdr, 'worktree-brave-meadow-2b28'));
+
+  return { home, ghqRoot, base, repo, sha: g(repo, 'rev-parse', 'HEAD') };
 }
 
-// A gwq that only answers `config get worktree.basedir`; anything else would be
-// the slow path, and reaching it here is a failure.
-function basedirShim(base) {
-  const dir = mkdtempSync(join(tmpdir(), 'gwqcd-bshim-'));
-  const p = join(dir, 'gwq');
-  writeFileSync(p, `#!/bin/sh
+// A gwq that answers only `config get worktree.basedir`, and an ghq that
+// answers only `root`. Anything else is the slow path, and reaching it here is
+// the failure these tests exist to catch.
+function homeShim({ base, ghqRoot, withGhq = true } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'gwqcd-hshim-'));
+  const write = (name, body) => {
+    writeFileSync(join(dir, name), body);
+    chmodSync(join(dir, name), 0o755);
+  };
+  write('gwq', `#!/bin/sh
 [ "$1" = "--version" ] && { echo "gwq version v0.1.1"; exit 0; }
 if [ "$1" = "config" ] && [ "$2" = "get" ]; then echo "${base}"; exit 0; fi
 echo "gwq: slow path taken" >&2
 exit 9
 `);
-  chmodSync(p, 0o755);
-  const fzf = join(dir, 'fzf');
-  writeFileSync(fzf, `#!/bin/sh
+  if (withGhq) {
+    write('ghq', `#!/bin/sh
+[ "$1" = "--version" ] && { echo "ghq version 1.6.2"; exit 0; }
+[ "$1" = "root" ] && { echo "${ghqRoot}"; exit 0; }
+exit 9
+`);
+  }
+  write('fzf', `#!/bin/sh
 [ "$1" = "--version" ] && { echo 0.74.1; exit 0; }
 if [ "$1" = "--filter" ]; then out=$(grep -F -- "$2"); [ -n "$out" ] || exit 1; printf '%s\\n' "$out"; exit 0; fi
 exit 2
 `);
-  chmodSync(fzf, 0o755);
   return dir;
 }
 
-test('worktrees are discovered by walking the base directory', () => {
-  const fx = realBasedir();
-  const shims = basedirShim(fx.base);
-  const r = run(['--list'], { shims });
-  rmSync(shims, { recursive: true, force: true });
-  rmSync(fx.root, { recursive: true, force: true });
+// Runs the CLI against a fixture home: HOME is redirected so the herdr root and
+// every tilde expansion land inside the fixture.
+function runIn(fx, args, { withGhq = true } = {}) {
+  const shims = homeShim({ base: fx.base, ghqRoot: fx.ghqRoot, withGhq });
+  try {
+    return run(args, { shims, env: { HOME: fx.home } });
+  } finally {
+    rmSync(shims, { recursive: true, force: true });
+  }
+}
+
+// Every path the fixture must yield, relative to $HOME, with its source.
+const EXPECTED = [
+  ['worktrees/host/owner/repo/feat-one', 'gwq'],
+  ['worktrees/host/owner/repo/feat-one/.claude/worktrees/season-amazing-net', 'claude'],
+  ['ghq/host/owner/repo/.claude/worktrees/agent-aed5fc34', 'claude'],
+  ['ghq/host/owner/repo/.claude/worktrees/drifting-giggling-pond', 'claude'],
+  ['ghq/host/owner/repo/.claude/worktrees/drifting-giggling-pond/.claude/worktrees/quizzical-jumping-tome', 'claude'],
+  ['.herdr/worktrees/repo/worktree-brave-meadow-2b28', 'herdr'],
+];
+
+test('a `claude -w` worktree inside a gwq worktree is found', () => {
+  const fx = realHome();
+  const r = runIn(fx, ['--list']);
+  rmSync(fx.home, { recursive: true, force: true });
   assert.equal(r.status, 0, r.stderr);
-  const paths = r.stdout.trim().split('\n').sort();
-  assert.equal(paths.length, 2, 'exactly the two linked worktrees');
-  assert.ok(paths[0].endsWith('feat-one'));
-  assert.ok(paths[1].endsWith('feat-two'));
+  assert.ok(
+    r.stdout.includes(join(fx.base, 'host/owner/repo/feat-one/.claude/worktrees/season-amazing-net')),
+    r.stdout,
+  );
   assert.doesNotMatch(r.stderr, /slow path/, 'gwq list must not be called');
 });
 
-test('the walk prunes at a worktree, so nested repositories are not listed', () => {
-  // Descending into a worktree is what cost gwq its second-plus, and a vendored
+test('the walk still prunes, so nested repositories are not listed', () => {
+  // Descending into a worktree is what cost gwq its 43 seconds, and a vendored
   // submodule is not somewhere anyone wants to cd.
-  const fx = realBasedir();
-  const shims = basedirShim(fx.base);
-  const r = run(['--list'], { shims });
-  rmSync(shims, { recursive: true, force: true });
-  rmSync(fx.root, { recursive: true, force: true });
+  const fx = realHome();
+  const r = runIn(fx, ['--list']);
+  rmSync(fx.home, { recursive: true, force: true });
   assert.doesNotMatch(r.stdout, /vendor\/dep/);
 });
 
-test('branch, commit and isMain come back correct — not the branch twice', () => {
+test('junk in .claude/worktrees without a .git is not a worktree', () => {
+  const fx = realHome();
+  const r = runIn(fx, ['--list']);
+  rmSync(fx.home, { recursive: true, force: true });
+  assert.doesNotMatch(r.stdout, /worktrees\/notes/);
+});
+
+test('the gwq worktree and its branch still come back correct', () => {
   // `git rev-parse --abbrev-ref HEAD HEAD` abbreviates *both* revs, so the
   // first version of this shipped the branch name in the commit field.
-  const fx = realBasedir();
-  const shims = basedirShim(fx.base);
-  const r = run(['--list', '--json'], { shims });
-  rmSync(shims, { recursive: true, force: true });
-  rmSync(fx.root, { recursive: true, force: true });
+  const fx = realHome();
+  const r = runIn(fx, ['--list', '--json']);
   const out = JSON.parse(r.stdout);
-  assert.equal(out.count, 2);
   const one = out.worktrees.find((w) => w.path.endsWith('feat-one'));
+  rmSync(fx.home, { recursive: true, force: true });
   assert.equal(one.branch, 'feat/one');
   assert.match(one.commit, /^[0-9a-f]{40}$/, 'a sha, not the branch name');
-  assert.equal(one.commit, fx.sha);
   assert.equal(one.isMain, false, 'a linked worktree is not the main one');
 });
 
 test('an unreadable or absent basedir falls back to gwq rather than failing', () => {
-  const shims = basedirShim('/nonexistent/gwq/basedir');
-  const r = run(['--json', 'x'], { shims });
+  const shims = homeShim({ base: '/nonexistent/gwq/basedir', ghqRoot: '/nonexistent/ghq' });
+  const empty = mkdtempSync(join(tmpdir(), 'gwqcd-emptyhome-'));
+  const r = run(['--json', 'x'], { shims, env: { HOME: empty } });
   rmSync(shims, { recursive: true, force: true });
+  rmSync(empty, { recursive: true, force: true });
   // The shim's `list` exits 9, which is the fallback being reached — the point
   // is that it is reached at all rather than reporting an empty list.
   assert.equal(jsonLine(r.stderr).error.code, 'E_GWQ');
