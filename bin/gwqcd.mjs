@@ -890,11 +890,23 @@ async function discoverWorktrees() {
 // worktree.basedir configured under the ghq root and lose every gwq worktree.
 function usableRoots(specs) {
   const out = [];
+  const seen = new Set();
   for (const { dir, emitAs } of specs) {
     if (!dir) continue;
+    let real;
     try {
-      out.push({ dir: realpathSync(dir), emitAs });
-    } catch { /* absent or unreadable: not a root */ }
+      real = realpathSync(dir);
+    } catch {
+      continue; // absent or unreadable: not a root
+    }
+    // Dedup on the pair, not on the directory. `GHQ_ROOT=~/ghq:~/ghq` walks the
+    // same tree twice for nothing; but a basedir that *equals* an ghq root is
+    // two different roots at one path — one emits, one only contributes its
+    // peek-only prefix — and collapsing those would lose whichever came second.
+    const key = `${emitAs ?? ''}\u0000${real}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ dir: real, emitAs });
   }
   return out;
 }
