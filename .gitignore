@@ -1,3 +1,7 @@
 node_modules/
 *.tgz
 .DS_Store
+
+# `claude -w` puts real worktrees here, inside the repository it belongs to.
+# Without this every agent worktree shows up as untracked in `git status`.
+.claude/worktrees/
