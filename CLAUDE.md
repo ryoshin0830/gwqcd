@@ -13,8 +13,10 @@ of `README.md` instead.
 
 A small Node.js CLI (~650 lines, zero runtime dependencies) that:
 
-1. Runs `gwq list -g --json` (or `gwq list --json` with `--local`) and parses it
-   in-process.
+1. Finds worktrees by walking three roots — gwq's base directory, the ghq root
+   for the `.claude/worktrees` inside its repositories, and `~/.herdr/worktrees`
+   — falling back to `gwq list -g --json` only if all three come up empty. With
+   `--local` it asks `git worktree list --porcelain` instead.
 2. Picks one worktree — interactively via `fzf`, or non-interactively via
    `fzf --filter`.
 3. Prints the chosen path: as a `cd "…"` box (default), one bare line
@@ -143,12 +145,101 @@ every rev that follows it, so `rev-parse --abbrev-ref HEAD HEAD` returns the
 branch name twice. The sha must be asked for first; the first cut of this
 shipped the branch name in the `commit` field.
 
-### I8. The branch name comes from gwq, not from the path
+### I7c. Three roots, and the ghq root is walked for what is *inside* it
+
+`claude -w` creates a real linked worktree at `<repo>/.claude/worktrees/<slug>`
+— inside the main worktree, which is the one place I7b's walk refuses to enter.
+herdr creates one at `~/.herdr/worktrees/<repo>/<slug>`. Eleven and one
+respectively on the machine this was measured on, all of them invisible to
+`gwq`.
+
+So discovery walks three roots:
+
+| root | resolution | `emitAs` |
+| --- | --- | --- |
+| gwq basedir | `gwq config get worktree.basedir` | `gwq` |
+| ghq root | `ghq root`, else `$GHQ_ROOT`, else `~/ghq` | **null** |
+| herdr root | `~/.herdr/worktrees` | `herdr` |
+
+`emitAs: null` on the ghq root is load-bearing. That root is walked to find the
+`.claude/worktrees` inside its repositories; emitting the pruned directory
+itself would add 44 main clones to the list and make `gwqcd` a worse `ghqcd`.
+There is a test asserting the main clone does not appear.
+
+The peek happens at the moment of pruning, at every root, and recurses into a
+found worktree's own `.claude/worktrees` because an agent can start an agent.
+Only a child with a `.git` of its own counts — `.claude/worktrees` also holds
+notes and scratch files.
+
+Overlap between roots is resolved by a first-writer-wins map keyed by path, and
+deliberately **not** by skipping a root nested inside another. Skipping looks
+tidier and is wrong: a `worktree.basedir` configured under the ghq root is the
+root that would be skipped, and every gwq worktree would vanish from the
+listing. A root that contributes nothing costs one wasted `readdir`.
+
+`gwq config get` and `ghq root` run concurrently, so the added wall-clock is
+the slower of the two rather than their sum:
+
+| step | cost |
+| --- | --- |
+| `gwq config get` ‖ `ghq root` | 45ms |
+| walk `~/ghq`, 44 repositories, 61 directories visited | 9ms |
+| walk the gwq basedir, 115 worktrees | 20ms |
+| walk `~/.herdr/worktrees` | 1ms |
+| **discovery, all three roots** | **75ms** |
+| for contrast, `gwq list -g --json` **today** | 43,756ms |
+
+That last number was 7,600ms when I7b was written. The slow path has become six
+times worse as worktrees accumulated, which is the strongest argument yet for
+not being on it.
+
+End to end, measured on 128 worktrees, three runs each:
+
+| command | cost |
+| --- | --- |
+| `--list` (discovery only, no metadata) | 212–231ms |
+| `--list --json` (128 `rev-parse`, 16 at a time) | 844–1003ms |
+| bare `node -e ''` for reference | 33ms |
+
+**The dominant term in a jump is now `ensureTool`, not discovery.** Three
+sequential `spawnSync(cmd, ['--version'])` calls for git, gwq and fzf cost
+about 120ms of that 220ms, and they predate I7c — adding two roots cost roughly
+50ms of it. Running the three checks concurrently would be the next real win
+here. It is not a free change: the order is what makes the error name the right
+tool (git is checked first for the I1b reason, and there is a test asserting
+that), so the checks may overlap but the *reporting* must stay ordered.
+
+**ghq is an optional dependency and must stay out of `ensureTool`.** I1b
+requires git because without it gwq reports zero worktrees to someone who has
+44 — a wrong answer, delivered silently. Missing ghq is not that failure: it
+means there is no ghq tree to search, so the `claude` source is empty and every
+other source returns exactly what it returned before. Degrading to correct
+behavior does not deserve exit 127.
+
+Adding a root that falls back to `~/ghq` is also what made the suite
+non-hermetic, twice over: the tests began walking the developer's real 44
+repositories, through that fallback and through a real `ghq` leaking in on
+`PATH` behind the shim directory. `run()` now pins `PATH` to the shim directory
+plus the system directories git lives in, hands every child a fresh empty
+`HOME` unless a fixture supplies one, and deletes `GHQ_ROOT` for the same
+reason it already deleted `FORCE_COLOR`.
+
+### I8. The branch name comes from git, not from the path
 
 `feat/login` is checked out in a directory named `feat-login`. The slug is
-lossy, so `branch` must be carried from the gwq payload through to the output —
+lossy, so `branch` must be carried from the payload through to the output —
 never re-derived from the path. This is the concrete thing the old
 `jq -r '.[].path'` pipeline threw away.
+
+Both sources added in I7c make this sharper, and both were verified on real
+worktrees:
+
+- `claude -w` puts branch `fix/editor-chat-domain-guide` in a directory called
+  `drifting-giggling-pond`. There is no relationship between the two at all.
+- One `agent-<hash>` worktree is on a detached HEAD and has no branch, so
+  `branch` is `""`.
+- herdr flattens `worktree/brave-meadow-2b28` to `worktree-brave-meadow-2b28`.
+  That is I8's original failure re-run on a second tool.
 
 ### I8b. The function must not capture output that is not a path
 
@@ -188,6 +279,7 @@ Selection:
   "branch":        "<ref name, may contain slashes>",
   "commit":        "<full commit hash>",
   "isMain":        true | false,
+  "source":        "gwq" | "claude" | "herdr" | "other",
   "matches":       <number of candidates the query matched>
 }
 ```
@@ -198,7 +290,7 @@ Listing (`--list --json`):
 {
   "schemaVersion": 1,
   "count":         <number>,
-  "worktrees":     [{ "path": "…", "branch": "…", "commit": "…", "isMain": false }]
+  "worktrees":     [{ "path": "…", "branch": "…", "commit": "…", "isMain": false, "source": "gwq" }]
 }
 ```
 
@@ -214,7 +306,16 @@ pass gwq's objects through untranslated.
 
 `matches` exists so a caller can detect that it got the best-scoring candidate
 of several rather than a unique hit. Adding fields is fine; removing or
-renaming requires a `schemaVersion` bump.
+renaming requires a `schemaVersion` bump. `source` was added in 0.3.0 under
+exactly that rule, which is why `schemaVersion` is still 1.
+
+`source` is assigned at discovery time and never re-derived from the path
+afterwards — except under `--local`, where git reports paths without any notion
+of provenance and the roots have to be recognised by shape. There the `.claude`
+test comes first, because a `claude -w` worktree inside a gwq worktree is under
+the gwq base directory too and the innermost convention is the one that made
+the directory. That labelling costs a `gwq config get`, so it is skipped unless
+a label is about to be printed or filtered on.
 
 stderr *carries* the error line; it is not exclusively JSON. Node warnings and
 child diagnostics share the stream. Consumers — including our own tests — must
@@ -335,6 +436,8 @@ The interactive fzf UI cannot be tested there. Run these by hand:
 | Cancel | `gwqcd`, press Esc | exit 130, shell stays put, no error line |
 | Ctrl-C | `gwqcd`, press Ctrl-C | exit 130, cursor restored |
 | Preview pane | `gwqcd` | right pane shows `git log --oneline -10` |
+| Agent worktree pick | `gwqcd drifting` | lands in a `claude -w` worktree |
+| Quiet picker | `gwqcd --source gwq` | no `.claude/worktrees` entries in fzf |
 | `--local` inside a repo | `gwqcd --local --list` | only that repo's worktrees |
 | `--local` outside a repo | `gwqcd --local --list` | "no worktrees", exit 2 |
 | npx one-shot | `npx gwqcd <q>` | branch line + box, `c` copies the cd command |
@@ -358,6 +461,9 @@ drive the interactive fzf UI by piping keystrokes into `script` — fzf reads
   user-visible interface change; document it in the commit.
 - `README.md` — end-user docs.
 - `test/cli.test.mjs` — shim-based CLI tests.
+- `docs/superpowers/specs/` and `docs/superpowers/plans/` — design and
+  implementation records. Excluded from the tarball by `files` and by
+  `.npmignore`.
 
 ---
 
@@ -367,7 +473,17 @@ drive the interactive fzf UI by piping keystrokes into `script` — fzf reads
 - **Deleting worktrees.** `gwq remove` exists and is destructive; wrapping it
   behind a fuzzy picker is a foot-gun.
 - **A richer fzf display** (repo + branch columns via `--with-nth`). The path
-  already encodes host, owner, repo and branch slug, and the extra columns
-  would have to guess the worktree base directory to be readable.
+  already encodes host, owner, repo, tool and branch slug:
+  `…/alchemy/.claude/worktrees/adaptive-hugging-horizon` and
+  `~/.herdr/worktrees/gwqcd/worktree-brave-meadow-2b28` each name their tool,
+  their repository and their slug. Adding the I7c sources did not change this,
+  and the extra columns would still have to guess a base directory to be
+  readable.
+- **Cleaning up finished agent worktrees.** `--source claude` makes the list
+  trivial to produce, which is exactly why the deletion is not automated here.
+  See `gwq remove` above.
+- **Repositories outside ghq's root.** A `~/dev/project` with agent worktrees
+  inside it is not found. `gwqcd` is a ghq and gwq tool; `--help` says where it
+  looks.
 - **A prompt library, a logger, or a clipboard package.** See I11.
 - **Telemetry / analytics.**

@@ -1,16 +1,20 @@
 ---
 name: gwqcd
 description: >
-  Resolve the absolute path of an existing git worktree managed by gwq, by fuzzy
-  query, or list every worktree with its real branch name. Use this skill when
-  work must happen in a worktree that already exists — not for creating
-  worktrees, cloning repositories, or locating a main clone.
+  Resolve the absolute path of an existing git worktree by fuzzy query, or list
+  every worktree with its real branch name and the tool that created it —
+  covering gwq worktrees, the ones `claude -w` puts at
+  <repo>/.claude/worktrees/<slug>, and the ones herdr puts under
+  ~/.herdr/worktrees. Use this skill when work must happen in a worktree that
+  already exists — not for creating worktrees, cloning repositories, or
+  locating a main clone.
 when_to_use: |
   Use when the user says one of (or equivalent intent):
     - "go to the feat/login worktree / login のワークツリーに移動"
     - "which worktrees do I have? / worktree 一覧"
     - "run the tests in the fix-cache worktree"
     - "where is branch X checked out?"
+    - "which agent worktrees are open? / claude -w のworktreeどれ?"
 
   Do NOT use this skill when the user wants any of:
     - creating a worktree, or one for a branch that has none yet (use `gwqpull`)
@@ -23,8 +27,15 @@ allowed-tools: Bash
 
 # gwqcd — resolve a gwq worktree path
 
-`gwqcd` wraps `gwq list --json` + `fzf` and prints the selected worktree path.
-With `--json` it never opens a UI, so it is safe to call from an agent session.
+`gwqcd` finds git worktrees in three places and prints the selected path. With
+`--json` it never opens a UI, so it is safe to call from an agent session.
+
+| `source` | location | created by |
+| --- | --- | --- |
+| `gwq` | `gwq config get worktree.basedir` | `gwq add` |
+| `claude` | `<repo>/.claude/worktrees/<slug>` | `claude -w` |
+| `herdr` | `~/.herdr/worktrees/<repo>/<slug>` | herdr |
+| `other` | anywhere else | only seen with `--local` |
 
 ## Prerequisites (verify before invoking)
 
@@ -46,19 +57,24 @@ If `gwqcd` is on PATH:
 gwqcd --json <query>
 ```
 
-Otherwise (pin to `^0.1`, NOT `@latest`, so a future major bump does not
+Otherwise (pin to `^0.3`, NOT `@latest`, so a future major bump does not
 silently break the flow):
 
 ```bash
-npx -y gwqcd@^0.1 --json <query>
+npx -y gwqcd@^0.3 --json <query>
 ```
+
+`^0.3` is a floor as well as a ceiling: `source` and `--source` arrived in
+0.3.0, and versions below 0.2 predate the fast discovery path entirely.
 
 To enumerate instead of picking:
 
 ```bash
-gwqcd --list --json                 # every worktree gwq knows about
+gwqcd --list --json                 # every worktree on the machine
 gwqcd --list --json --no-main       # linked worktrees only
 gwqcd --list --json --local         # only the current repository's
+gwqcd --list --json --source gwq    # no agent worktrees
+gwqcd --list --json --source claude # only `claude -w` worktrees
 ```
 
 ## Output (stdout, 1 line)
@@ -70,6 +86,7 @@ gwqcd --list --json --local         # only the current repository's
   "branch":        "feat/login",
   "commit":        "8f2c1a9…",
   "isMain":        false,
+  "source":        "gwq",
   "matches":       1
 }
 ```
@@ -80,7 +97,7 @@ gwqcd --list --json --local         # only the current repository's
 {
   "schemaVersion": 1,
   "count":         2,
-  "worktrees":     [{ "path": "…", "branch": "…", "commit": "…", "isMain": false }]
+  "worktrees":     [{ "path": "…", "branch": "…", "commit": "…", "isMain": false, "source": "gwq" }]
 }
 ```
 
@@ -106,6 +123,27 @@ best-scoring one. Do not silently act on it: show the user the candidates
 path can run commands against the wrong branch.
 
 `matches == 1` is unambiguous; proceed.
+
+## An agent worktree is somebody else's workspace
+
+A `source` of `claude` or `herdr` means that worktree was handed to another
+agent session. Running commands there, and especially committing there,
+collides with work in progress that is not yours.
+
+When you need a worktree to *work in*, ask for one that is not an agent's:
+
+```bash
+gwqcd --json --source gwq <query>
+```
+
+Read a `claude` or `herdr` worktree when the user asked about that specific
+one — "what is the drifting-giggling-pond agent doing?" is a fair question.
+Do not adopt it as your own working directory unless the user says so.
+
+Their directory names are random and carry no branch information at all:
+`drifting-giggling-pond` is on `fix/editor-chat-domain-guide`, and an
+`agent-<hash>` worktree is often on a detached HEAD with `"branch": ""`.
+Read `branch`, never the path.
 
 ## Errors (stderr, 1 line JSON, non-zero exit)
 
@@ -137,6 +175,7 @@ On `E_NO_MATCH`, the worktree does not exist yet. Say so and offer `gwqpull`
 - Call `gwqcd` without `--json` and try to parse the box output.
 - Treat a `matches > 1` result as a confirmed choice.
 - Infer the branch from the directory name instead of reading `branch`.
+- Start working in a `source` of `claude` or `herdr` without being asked to.
 - Run `gwqcd --init` to modify the user's shell config without being asked.
 - Run `gwq remove` / `git worktree remove` as a follow-up. Deleting a worktree
   can destroy uncommitted work; that is the user's call.

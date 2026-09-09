@@ -62,9 +62,9 @@ guessed from the path afterwards.
 
 | source   | location                             | how it is found                        |
 | -------- | ------------------------------------ | -------------------------------------- |
-| `gwq`    | gwq's `worktree.basedir`             | walk, the pruned directory counts      |
+| `gwq`    | gwq's `worktree.basedir`             | walk, `emitAs: 'gwq'`                  |
 | `claude` | `<repo>/.claude/worktrees/<slug>`    | peek at every prune point, every root  |
-| `herdr`  | `~/.herdr/worktrees/<repo>/<slug>`   | walk, the pruned directory counts      |
+| `herdr`  | `~/.herdr/worktrees/<repo>/<slug>`   | walk, `emitAs: 'herdr'`                |
 | `other`  | anything else                        | only reachable through `--local`       |
 
 ### Roots
@@ -103,7 +103,10 @@ Degrading to today's correct behavior does not deserve exit 127.
 
 ### The walk
 
-`walkWorktrees` gains one option, `includeRoots`, and one behavior.
+`walkWorktrees` gains one option, `emitAs`, and one behavior. (Drafted as a
+boolean `includeRoots`; it became `emitAs` during implementation, because the
+same argument has to carry *which* source labels the pruned directory, and two
+fields where one will do rot apart.)
 
 At a prune point — a directory containing `.git` — it now always peeks at
 `<dir>/.claude/worktrees`, keeps the children that contain a `.git` of their
@@ -111,11 +114,11 @@ own, and recurses into each child's own `.claude/worktrees` under the same
 depth guard, because an agent can start an agent. It still never descends into
 the repository itself.
 
-The pruned directory is pushed as a candidate only when `includeRoots` is set.
-The ghq root is walked with `includeRoots: false`: those directories are main
-clones, and a main clone is `ghqcd`'s job, not this tool's. Walking `~/ghq`
-without that flag would add 44 entries nobody asked for and would silently
-turn `gwqcd` into a worse `ghqcd`.
+The pruned directory is pushed as a candidate only when `emitAs` is non-null.
+The ghq root is walked with `emitAs: null`: those directories are main clones,
+and a main clone is `ghqcd`'s job, not this tool's. Walking `~/ghq` without
+that would add 44 entries nobody asked for and would silently turn `gwqcd`
+into a worse `ghqcd`.
 
 ### Fallback
 
@@ -197,11 +200,19 @@ Measured on this machine: 44 ghq repositories, 115 gwq worktrees, 11 from
 | walk `~/ghq`, prune at `.git`, peek `.claude`   | 9ms       |
 | walk gwq basedir                                | 20ms      |
 | walk `~/.herdr/worktrees`                       | 1ms       |
-| `resolveMeta`, all 127 entries, 16 at a time    | 250ms     |
+| **discovery, all three roots**                  | **75ms**  |
 | for contrast: `gwq list -g --json`              | 43,756ms  |
 
-The interactive path resolves no metadata, so it stays under 100ms. `--list`
-adds one process spawn to today's cost and no measurable walk time.
+End to end on the finished implementation, 128 worktrees, three runs each:
+`--list` costs 212–231ms and `--list --json` costs 844–1003ms, against a bare
+`node -e ''` at 33ms.
+
+Two roots therefore cost about 50ms on a jump. The honest surprise in those
+numbers is that they are no longer where the time goes: `ensureTool`'s three
+sequential `--version` spawns account for roughly 120ms of the 220ms, and they
+predate this change. Making them concurrent is the next real win and is left
+out of scope here, because the check order is what makes the error name the
+right tool and a test asserts it.
 
 ## Testing
 
