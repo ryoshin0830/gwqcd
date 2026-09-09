@@ -1066,6 +1066,63 @@ test('a bare repository is pruned rather than walked', (t) => {
     `only the neighbouring repo's agent worktree should appear:\n${r.stdout}`);
 });
 
+test('agent nesting is not rationed by how deep the repository sits', (t) => {
+  // The walk's directory depth and the agent-generation count used to share
+  // one counter, so the same chain truncated at a different length depending
+  // on where its repository happened to live. Two identical six-deep chains,
+  // one in a shallow root and one four levels down, must both come back whole.
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'gwqcd-gen-')));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const gitEnv = {
+    ...process.env,
+    HOME: home,
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+  };
+  const g = (cwd, ...a) => {
+    const r = spawnSync('git', a, { cwd, encoding: 'utf8', env: gitEnv });
+    if (r.status !== 0) throw new Error(`git ${a.join(' ')}: ${r.stderr}`);
+  };
+  const CHAIN = 6;
+  const chainUnder = (repoRel, tag) => {
+    const repo = join(home, repoRel);
+    mkdirSync(repo, { recursive: true });
+    g(repo, 'init', '-q', '-b', 'main');
+    g(repo, 'config', 'user.email', 't@e.com');
+    g(repo, 'config', 'user.name', 'T');
+    writeFileSync(join(repo, 'a.txt'), 'x\n');
+    g(repo, 'add', '-A');
+    g(repo, 'commit', '-qm', 'init');
+    const made = [];
+    let host = repo;
+    for (let i = 0; i < CHAIN; i++) {
+      const wt = join(host, '.claude', 'worktrees', `${tag}-${i}`);
+      mkdirSync(dirname(wt), { recursive: true });
+      g(repo, 'worktree', 'add', '-q', '-b', `${tag}/${i}`, wt);
+      made.push(wt);
+      host = wt;
+    }
+    return made;
+  };
+  // Shallow: <root>/repo. Deep: <root>/a/b/c/repo, four levels in.
+  const shallow = chainUnder('ghq/shallow', 'sh');
+  const deep = chainUnder('ghq/a/b/c/deep', 'dp');
+  mkdirSync(join(home, 'worktrees'), { recursive: true });
+  const shims = geometryShim({
+    basedir: join(home, 'worktrees'),
+    ghqRoots: [join(home, 'ghq')],
+  });
+  t.after(() => rmSync(shims, { recursive: true, force: true }));
+
+  const r = run(['--list'], { shims, env: { HOME: home } });
+  assert.equal(r.status, 0, r.stderr);
+  const lines = new Set(r.stdout.trim().split('\n'));
+  const missing = [...shallow, ...deep].filter((w) => !lines.has(w));
+  assert.deepEqual(missing, [],
+    `${missing.length} of ${CHAIN * 2} agent worktrees were rationed away:\n${r.stdout}`);
+});
+
 // ── the emitted function, actually run ───────────────────────────────────────
 //
 // A syntax check never caught this: with the function installed, every flag

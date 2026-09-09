@@ -221,6 +221,14 @@ found worktree's own `.claude/worktrees` because an agent can start an agent.
 Only a child with a `.git` of its own counts — `.claude/worktrees` also holds
 notes and scratch files.
 
+**Agent generations are counted separately from directory depth.** The two
+shared one counter at first, so the budget for agent nesting was whatever the
+walk had left over: the same ten-deep chain truncated at six under the ghq root
+and at five inside a gwq worktree, silently, for a reason with nothing to do
+with agents. `MAX_AGENT_GENERATIONS` is its own limit now, and a test builds
+two identical chains — one in a shallow repository, one four levels down — and
+requires both to come back whole.
+
 Overlap between roots is resolved by a first-writer-wins map keyed by path, and
 deliberately **not** by skipping a root nested inside another. Skipping looks
 tidier and is wrong: a `worktree.basedir` configured under the ghq root is the

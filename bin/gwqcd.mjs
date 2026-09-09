@@ -645,7 +645,7 @@ function walkWorktrees(dir, { emitAs, peekOnly = [], depth = 0, out = [] }) {
     if (emitAs && !suppress) {
       out.push({ path: dir, source: emitAs });
     }
-    collectClaudeWorktrees(dir, depth, out);
+    collectClaudeWorktrees(dir, out);
     return out;
   }
   // A bare repository — `ghq get --bare` makes them — has no `.git` at all, so
@@ -695,8 +695,15 @@ function isLinkedWorktree(dir) {
 // .claude/worktrees can hold anything the agent left behind, so only a
 // directory with a `.git` of its own counts. Recurses because an agent can
 // start an agent, under the same depth guard as the walk.
-function collectClaudeWorktrees(repo, depth, out) {
-  if (depth > 8) return;
+// `generation` counts agent-inside-agent nesting and is deliberately NOT the
+// walk's directory depth. Sharing one counter meant the budget for agent
+// generations was whatever the walk had left over, so the same ten-deep chain
+// truncated at six under the ghq root and at five inside a gwq worktree —
+// silently, and for a reason that has nothing to do with agents.
+const MAX_AGENT_GENERATIONS = 8;
+
+function collectClaudeWorktrees(repo, out, generation = 0) {
+  if (generation > MAX_AGENT_GENERATIONS) return;
   const base = joinPath(repo, '.claude', 'worktrees');
   let entries;
   try {
@@ -709,7 +716,7 @@ function collectClaudeWorktrees(repo, depth, out) {
     const wt = joinPath(base, e.name);
     if (!existsSync(joinPath(wt, '.git'))) continue;
     out.push({ path: wt, source: 'claude' });
-    collectClaudeWorktrees(wt, depth + 1, out);
+    collectClaudeWorktrees(wt, out, generation + 1);
   }
 }
 
