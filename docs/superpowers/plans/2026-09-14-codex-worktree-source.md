@@ -95,7 +95,7 @@ if (!found.has(e.path)) found.set(e.path, source);
 - [x] Run `npm test`, `npm pack --dry-run`, and `git diff --check`. Confirm the package contains only intended runtime files.
 - [x] Run live `--list --json`, `--source codex`, `--quiet /Users/shin-ryo/.codex/worktrees/4e86/general`, and local selection. Compare branch, commit and isMain with Git. Compare six samples of `node bin/gwqcd.mjs --list` with the measured baseline median of 224.5 ms.
 - [x] Use a verification subagent to review changes against the design, while independently checking documentation and live behavior. Resolve concrete issues and rerun affected checks.
-- [ ] Commit verified documentation, push the branch, and create a PR against main with gh-pr-body (--body-file). Fetch the PR back to verify head, base, diff and description; open its review panel in Codex and verify the open result.
+- [x] Commit verified documentation, push the branch, and create a PR against main with gh-pr-body (--body-file). Fetch the PR back to verify head, base, diff and description; open its review panel in Codex and verify the open result.
 
 ## Progress and evidence
 
@@ -108,3 +108,5 @@ if (!found.has(e.path)) found.set(e.path, source);
 - After --list samples (ms): 201, 198, 195, 189, 195, 214; median 196.5. Whole-command timings, not an isolated walker measurement or guaranteed speedup.
 - Package dry-run: exactly LICENSE, README.md, bin/gwqcd.mjs and package.json; no dependencies bundled.
 - Independent code review found no issues and repeated all 82 tests and package/diff checks successfully.
+- Delivered https://github.com/ryoshin0830/gwqcd/pull/2 against main as an open, non-draft PR. Body and changed files verified via gh. Codex review panel queued for this task; the browser PR page was also opened, its title/Open state/body verified, and retained for the user.
+- GitHub reports no status checks for this PR. Its automatic Copilot review did not run due to quota; the independent local review above is the completed review.

@@ -1,6 +1,6 @@
 # Codex App worktree discovery
 
-Status: implemented and verified; proceeding to PR delivery. The user directed
+Status: implemented, verified, and delivered as PR #2. The user directed
 continuation through implementation and opening a PR after this design was presented.
 
 ## Investigation
