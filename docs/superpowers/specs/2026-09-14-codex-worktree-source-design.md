@@ -1,6 +1,7 @@
 # Codex App worktree discovery
 
-Status: proposed for user review; implementation has not started.
+Status: proceeding with the presented design after the user's instruction to
+continue through implementation and opening a PR.
 
 ## Investigation
 
