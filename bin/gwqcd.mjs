@@ -29,7 +29,7 @@ OPTIONS
   --query <q>        initial fzf query (same as the positional argument)
   --local            only the current repository's worktrees (default: all)
   --no-main          hide main worktrees, leaving only linked ones
-  --source <list>    comma-separated: gwq | claude | herdr | other | all (default: all)
+  --source <list>    comma-separated: gwq | claude | herdr | codex | other | all (default: all)
   --list             print every candidate instead of picking one
   --json             stdout = 1-line JSON, never opens the fzf UI
   --quiet            stdout = path only (this is what the shell function uses)
@@ -50,10 +50,11 @@ WHERE IT LOOKS
   claude   <repo>/.claude/worktrees/… for every repository under \`ghq root\`,
            and inside every worktree found above — what \`claude -w\` creates
   herdr    ~/.herdr/worktrees/<repo>/…
+  codex    $CODEX_HOME/worktrees/<id>/<repo> (default: ~/.codex/worktrees)
 
-  ghq is optional: without it there is no ghq root to search, so only the gwq
-  and herdr roots are peeked for .claude/worktrees. A repository somewhere else
-  entirely, say ~/dev/project, is not searched at all.
+  ghq is optional: roots fall back to $GHQ_ROOT, then ~/ghq. All discovered
+  worktrees are also peeked for .claude/worktrees. A repository somewhere else
+  entirely, say ~/dev/project, is not searched globally; use --local there.
 
 WHY --init
   A child process cannot change its parent shell's directory, so \`npx ${PKG}\`
@@ -363,9 +364,8 @@ if (values.cmd != null) {
 }
 
 // A worktree's source is the tool whose convention put it where it is. `other`
-// is only reachable through --local: global discovery walks exactly the three
-// roots that produce the other three.
-const SOURCES = ['gwq', 'claude', 'herdr', 'other'];
+// is only reachable through --local: global discovery walks known source roots.
+const SOURCES = ['gwq', 'claude', 'herdr', 'codex', 'other'];
 const SOURCE_LIST = `${SOURCES.join(' | ')} | all`;
 
 // null means every source, which is the default.
@@ -591,6 +591,10 @@ async function ghqRoots() {
 // contract. If it ever grows one, this becomes a one-line change.
 function herdrRoot() {
   return joinPath(homedir(), '.herdr', 'worktrees');
+}
+
+function codexRoot() {
+  return joinPath(expandTilde(process.env.CODEX_HOME || joinPath(homedir(), '.codex')), 'worktrees');
 }
 
 // Prune at the worktree. Descending into one means walking node_modules and
@@ -847,12 +851,18 @@ async function discoverWorktrees() {
     // never for the repositories themselves.
     ...ghq.map((dir) => ({ dir, emitAs: null })),
     { dir: herdrRoot(), emitAs: 'herdr' },
+    { dir: codexRoot(), emitAs: 'codex' },
   ]);
   const peekOnly = roots.filter((r) => !r.emitAs).map((r) => r.dir);
+  const codexPrefixes = roots.filter((r) => r.emitAs === 'codex').map((r) => r.dir);
 
   for (const root of roots) {
     for (const e of walkWorktrees(root.dir, { emitAs: root.emitAs, peekOnly })) {
-      if (!found.has(e.path)) found.set(e.path, e.source);
+      // A broad gwq basedir can reach the Codex root first. Label by the
+      // canonical Codex prefix while keeping nested Claude agents distinct.
+      const source = e.source === 'claude' ? 'claude'
+        : isUnder(e.path, codexPrefixes) ? 'codex' : e.source;
+      if (!found.has(e.path)) found.set(e.path, source);
     }
   }
 
@@ -928,7 +938,7 @@ function usableRoots(specs) {
 async function sourceRoots(basedir) {
   const dirs = basedir === undefined ? await gwqBasedir() : basedir;
   const roots = [];
-  for (const [dir, source] of [[dirs, 'gwq'], [herdrRoot(), 'herdr']]) {
+  for (const [dir, source] of [[codexRoot(), 'codex'], [dirs, 'gwq'], [herdrRoot(), 'herdr']]) {
     if (!dir) continue;
     try { roots.push([realpathSync(dir), source]); } catch { /* not a root */ }
   }
@@ -1122,7 +1132,7 @@ async function main() {
   if (paths.length === 0) {
     die('E_NO_MATCH', values.local
       ? 'this repository has no worktrees. Create one with `gwq add <branch>`.'
-      : "no worktrees found under gwq's base directory, ~/.herdr/worktrees, or "
+      : "no worktrees found under gwq's base directory, ~/.herdr/worktrees, the Codex worktree root, or "
         + 'any .claude/worktrees below the ghq root. Create one with `gwq add <branch>`.');
   }
 

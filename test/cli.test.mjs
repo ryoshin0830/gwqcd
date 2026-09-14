@@ -60,20 +60,21 @@ exit 2
 // was written for. HOME is a fresh empty directory for the same reason — the
 // herdr root and the `~/ghq` fallback have to land somewhere the test controls,
 // or the suite starts reporting the developer's own 44 repositories. GHQ_ROOT
-// goes for the same reason as FORCE_COLOR: it is theirs, not ours.
+// and CODEX_HOME go for the same reason as FORCE_COLOR: they are theirs, not ours.
 function run(args, { shims, cwd, env } = {}) {
   const dir = shims ?? makeShims();
   const ownHome = env?.HOME ? null : mkdtempSync(join(tmpdir(), 'gwqcd-nohome-'));
   const childEnv = { ...process.env };
   // We force NO_COLOR; node itself warns to stderr when FORCE_COLOR is also
   // set, so a developer who exports it would otherwise see phantom failures.
-  // GHQ_ROOT goes for the same reason: it is theirs, not ours.
+  // GHQ_ROOT and CODEX_HOME go for the same reason: they are theirs, not ours.
   //
-  // Both are dropped *before* the caller's own env is applied, so a test that
+  // These are dropped *before* the caller's own env is applied, so a test that
   // deliberately sets GHQ_ROOT — the fallback branch has to be exercised
   // somehow — still gets it, while an exported one can never leak in.
   delete childEnv.FORCE_COLOR;
   delete childEnv.GHQ_ROOT;
+  delete childEnv.CODEX_HOME;
   Object.assign(childEnv, {
     PATH: `${dir}:/usr/bin:/bin`,
     HOME: env?.HOME ?? ownHome,
@@ -671,7 +672,7 @@ test('an unknown --source value is E_VALIDATION and names the valid ones', () =>
   const e = jsonLine(r.stderr).error;
   assert.equal(e.code, 'E_VALIDATION');
   assert.match(e.message, /jujutsu/);
-  assert.match(e.message, /gwq \| claude \| herdr \| other \| all/);
+  assert.match(e.message, /gwq \| claude \| herdr \| codex \| other \| all/);
 });
 
 test('--source with a query that filters everything out is E_NO_MATCH', (t) => {
@@ -710,6 +711,170 @@ test('--local --source other is the main clone alone', (t) => {
   });
   const lines = r.stdout.trim().split('\n');
   assert.deepEqual(lines, [fx.repo]);
+});
+
+// Codex uses an opaque session directory; neither it nor the repo basename
+// tells us the branch. Each test owns its home so root geometry can change.
+function codexFixture(t, codexHome = '.codex') {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'gwqcd-codex-')));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const fx = repoAt(home, {
+    repoRel: 'ghq/host/o/repo',
+    worktreeRel: `${codexHome}/worktrees/4e86/general`,
+  });
+  const base = join(home, 'worktrees');
+  mkdirSync(base);
+  const shims = homeShim({ base, ghqRoot: join(home, 'ghq') });
+  t.after(() => rmSync(shims, { recursive: true, force: true }));
+  const git = (...args) => {
+    const r = spawnSync('git', ['-C', fx.repo, ...args], {
+      encoding: 'utf8', env: {
+        ...process.env, HOME: home, GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
+      },
+    });
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout.trim();
+  };
+  const cli = (args, env = {}) => run(args, { shims, cwd: fx.repo, env: { HOME: home, ...env } });
+  return { ...fx, home, base, shims, git, cli };
+}
+
+test('Codex detached worktrees are globally discoverable with actual Git metadata', (t) => {
+  const fx = codexFixture(t);
+  fx.git('-C', fx.worktree, 'checkout', '--detach');
+  const r = fx.cli(['--list', '--json']);
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.schemaVersion, 1);
+  assert.equal(out.count, 1);
+  assert.deepEqual(out.worktrees[0], {
+    path: fx.worktree, branch: '', commit: fx.git('rev-parse', 'HEAD'),
+    isMain: false, source: 'codex',
+  });
+});
+
+test('Codex filters, quiet selection and local labels agree for a named branch', (t) => {
+  const fx = codexFixture(t);
+  for (const flags of [[], ['--source', 'codex'], ['--source', 'all'],
+    ['--source', 'codex,herdr'], ['--local', '--source', 'codex'], ['--no-main']]) {
+    const r = fx.cli(['--list', '--json', ...flags]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout).worktrees, [{
+      path: fx.worktree, branch: 'feat/one', commit: fx.git('rev-parse', 'HEAD'),
+      isMain: false, source: 'codex',
+    }]);
+  }
+  const quiet = fx.cli(['--quiet', '--source', 'codex', '4e86/general']);
+  assert.equal(quiet.status, 0, quiet.stderr);
+  assert.equal(quiet.stdout, fx.worktree + '\n');
+  assert.equal(ourStderr(quiet.stderr), '');
+  const selected = fx.cli(['--json', '--source', 'codex', '4e86/general']);
+  assert.equal(selected.status, 0, selected.stderr);
+  assert.equal(JSON.parse(selected.stdout).matches, 1);
+  assert.equal(JSON.parse(selected.stdout).source, 'codex');
+  const excluded = fx.cli(['--list', '--json', '--source', 'gwq']);
+  assert.equal(excluded.status, 2);
+  assert.equal(jsonLine(excluded.stderr).error.code, 'E_NO_MATCH');
+});
+
+test('Codex CODEX_HOME overrides the default, including tilde expansion', (t) => {
+  const fx = codexFixture(t, 'custom codex');
+  // A second real worktree in the default root must not leak into the override.
+  const defaultPath = join(fx.home, '.codex/worktrees/default/repo');
+  fx.git('worktree', 'add', '-q', '--detach', defaultPath);
+  for (const codexHome of [join(fx.home, 'custom codex'), '~/custom codex']) {
+    for (const flags of [[], ['--local']]) {
+      const r = fx.cli(['--list', '--source', 'codex', ...flags], { CODEX_HOME: codexHome });
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(r.stdout, fx.worktree + '\n');
+    }
+  }
+  const empty = fx.cli(['--list', '--source', 'codex'], { CODEX_HOME: '' });
+  assert.equal(empty.status, 0, empty.stderr);
+  assert.equal(empty.stdout, defaultPath + '\n');
+});
+
+test('Codex walker prunes checked-out files but peeks at nested Claude worktrees', (t) => {
+  const fx = codexFixture(t);
+  const agent = join(fx.worktree, '.claude/worktrees/agent');
+  const vendor = join(fx.worktree, 'vendor/repo');
+  fx.git('worktree', 'add', '-q', '--detach', agent);
+  fx.git('worktree', 'add', '-q', '--detach', vendor);
+  const all = fx.cli(['--list', '--json']);
+  assert.equal(all.status, 0, all.stderr);
+  assert.deepEqual(JSON.parse(all.stdout).worktrees.map((w) => [w.path, w.source]),
+    [[fx.worktree, 'codex'], [agent, 'claude']]);
+  for (const flags of [[], ['--local']]) {
+    const r = fx.cli(['--list', '--source', 'claude', ...flags]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, agent + '\n');
+  }
+});
+
+for (const geometry of ['ancestor', 'equal', 'symlink']) {
+  test(`Codex root ${geometry} overlap keeps one candidate and consistent source`, (t) => {
+    const fx = codexFixture(t);
+    const root = join(fx.home, '.codex/worktrees');
+    const alias = join(fx.home, 'codex-alias');
+    symlinkSync(join(fx.home, '.codex'), alias);
+    const basedir = geometry === 'ancestor' ? fx.home
+      : geometry === 'equal' ? root : join(alias, 'worktrees');
+    const shims = homeShim({ base: basedir, ghqRoot: join(fx.home, 'ghq') });
+    t.after(() => rmSync(shims, { recursive: true, force: true }));
+    for (const flags of [[], ['--local']]) {
+      const r = run(['--list', '--json', '--source', 'codex', ...flags], {
+        shims, cwd: fx.repo, env: { HOME: fx.home, CODEX_HOME: alias },
+      });
+      assert.equal(r.status, 0, r.stderr);
+      assert.deepEqual(JSON.parse(r.stdout).worktrees.map((w) => w.path), [fx.worktree]);
+    }
+  });
+}
+
+test('Codex missing or non-directory roots do not hide other sources', (t) => {
+  const fx = codexFixture(t);
+  const gwqPath = join(fx.base, 'gwq-wt');
+  fx.git('worktree', 'add', '-q', '--detach', gwqPath);
+  const file = join(fx.home, 'not-a-directory');
+  writeFileSync(file, 'x');
+  for (const codexHome of [join(fx.home, 'missing'), file]) {
+    const r = fx.cli(['--list'], { CODEX_HOME: codexHome });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, gwqPath + '\n');
+  }
+});
+
+test('Codex discovery supplements gwq fallback without suppressing its errors', (t) => {
+  const fx = codexFixture(t);
+  const shims = makeShims(); // no basedir: use gwq list fallback
+  t.after(() => rmSync(shims, { recursive: true, force: true }));
+  const r = run(['--list', '--json'], { shims, env: { HOME: fx.home } });
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.count, WORKTREES.length + 1);
+  assert.equal(out.worktrees.find((w) => w.path === fx.worktree).source, 'codex');
+  const broken = makeShims({ gwqStatus: 1, gwqStderr: 'gwq failure' });
+  t.after(() => rmSync(broken, { recursive: true, force: true }));
+  const failed = run(['--list', '--json'], { shims: broken, env: { HOME: fx.home } });
+  assert.equal(failed.status, 1);
+  assert.equal(jsonLine(failed.stderr).error.code, 'E_GWQ');
+});
+
+test('Codex unreadable root is skipped while gwq remains usable', (t) => {
+  if (process.getuid?.() === 0) return t.skip('root bypasses directory permissions');
+  const fx = codexFixture(t);
+  const root = join(fx.home, '.codex/worktrees');
+  const gwqPath = join(fx.base, 'gwq-wt');
+  fx.git('worktree', 'add', '-q', '--detach', gwqPath);
+  chmodSync(root, 0o000);
+  try {
+    const r = fx.cli(['--list']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, gwqPath + '\n');
+  } finally {
+    chmodSync(root, 0o700);
+  }
 });
 
 // ── overlapping roots, and more than one ghq root ────────────────────────────
