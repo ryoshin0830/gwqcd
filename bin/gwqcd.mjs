@@ -6,6 +6,7 @@ import { readFileSync, readdirSync, existsSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join as joinPath, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { pickerRows } from './picker.mjs';
 
 // Read from package.json rather than a hand-maintained constant: `npm version`
 // only bumps the manifest, so a literal here silently drifts and `--version`
@@ -29,7 +30,7 @@ OPTIONS
   --query <q>        initial fzf query (same as the positional argument)
   --local            only the current repository's worktrees (default: all)
   --no-main          hide main worktrees, leaving only linked ones
-  --source <list>    comma-separated: gwq | claude | herdr | other | all (default: all)
+  --source <list>    comma-separated: gwq | claude | herdr | codex | other | all (default: all)
   --list             print every candidate instead of picking one
   --json             stdout = 1-line JSON, never opens the fzf UI
   --quiet            stdout = path only (this is what the shell function uses)
@@ -50,10 +51,11 @@ WHERE IT LOOKS
   claude   <repo>/.claude/worktrees/… for every repository under \`ghq root\`,
            and inside every worktree found above — what \`claude -w\` creates
   herdr    ~/.herdr/worktrees/<repo>/…
+  codex    $CODEX_HOME/worktrees/<id>/<repo> (default: ~/.codex/worktrees)
 
-  ghq is optional: without it there is no ghq root to search, so only the gwq
-  and herdr roots are peeked for .claude/worktrees. A repository somewhere else
-  entirely, say ~/dev/project, is not searched at all.
+  ghq is optional: roots fall back to $GHQ_ROOT, then ~/ghq. All discovered
+  worktrees are also peeked for .claude/worktrees. A repository somewhere else
+  entirely, say ~/dev/project, is not searched globally; use --local there.
 
 WHY --init
   A child process cannot change its parent shell's directory, so \`npx ${PKG}\`
@@ -363,9 +365,8 @@ if (values.cmd != null) {
 }
 
 // A worktree's source is the tool whose convention put it where it is. `other`
-// is only reachable through --local: global discovery walks exactly the three
-// roots that produce the other three.
-const SOURCES = ['gwq', 'claude', 'herdr', 'other'];
+// is only reachable through --local: global discovery walks known source roots.
+const SOURCES = ['gwq', 'claude', 'herdr', 'codex', 'other'];
 const SOURCE_LIST = `${SOURCES.join(' | ')} | all`;
 
 // null means every source, which is the default.
@@ -591,6 +592,10 @@ async function ghqRoots() {
 // contract. If it ever grows one, this becomes a one-line change.
 function herdrRoot() {
   return joinPath(homedir(), '.herdr', 'worktrees');
+}
+
+function codexRoot() {
+  return joinPath(expandTilde(process.env.CODEX_HOME || joinPath(homedir(), '.codex')), 'worktrees');
 }
 
 // Prune at the worktree. Descending into one means walking node_modules and
@@ -847,12 +852,18 @@ async function discoverWorktrees() {
     // never for the repositories themselves.
     ...ghq.map((dir) => ({ dir, emitAs: null })),
     { dir: herdrRoot(), emitAs: 'herdr' },
+    { dir: codexRoot(), emitAs: 'codex' },
   ]);
   const peekOnly = roots.filter((r) => !r.emitAs).map((r) => r.dir);
+  const codexPrefixes = roots.filter((r) => r.emitAs === 'codex').map((r) => r.dir);
 
   for (const root of roots) {
     for (const e of walkWorktrees(root.dir, { emitAs: root.emitAs, peekOnly })) {
-      if (!found.has(e.path)) found.set(e.path, e.source);
+      // A broad gwq basedir can reach the Codex root first. Label by the
+      // canonical Codex prefix while keeping nested Claude agents distinct.
+      const source = e.source === 'claude' ? 'claude'
+        : isUnder(e.path, codexPrefixes) ? 'codex' : e.source;
+      if (!found.has(e.path)) found.set(e.path, source);
     }
   }
 
@@ -928,7 +939,7 @@ function usableRoots(specs) {
 async function sourceRoots(basedir) {
   const dirs = basedir === undefined ? await gwqBasedir() : basedir;
   const roots = [];
-  for (const [dir, source] of [[dirs, 'gwq'], [herdrRoot(), 'herdr']]) {
+  for (const [dir, source] of [[codexRoot(), 'codex'], [dirs, 'gwq'], [herdrRoot(), 'herdr']]) {
     if (!dir) continue;
     try { roots.push([realpathSync(dir), source]); } catch { /* not a root */ }
   }
@@ -956,25 +967,36 @@ function classifySource(path, roots) {
 
 // ── fzf ──────────────────────────────────────────────────────────────────────
 
-const PREVIEW = 'git -C {} log --oneline -10';
+const PREVIEW = `${shq(process.execPath)} ${shq(fileURLToPath(new URL('./picker.mjs', import.meta.url)))} {1}`;
 
 // Interactive pick. fzf renders on /dev/tty and writes only the selection to
 // stdout, so capturing stdout here does not disturb the UI.
-function fzfPick(candidates) {
+function fzfPick(candidates, meta) {
+  const rows = pickerRows(candidates, meta, { home: homedir(), color: useColor });
+  const byKey = new Map(rows.map((row) => [row.key, row.path]));
+  const terminalRows = process.stderr.rows || process.stdout.rows || process.stdin.rows || 24;
   const args = [
-    '--height=40%',
+    '--height=70%',
     '--layout=reverse',
     '--border',
+    '--ansi',
+    '--delimiter=\t',
+    '--with-nth=2..',
+    '--tabstop=32',
     '--prompt=worktree> ',
+    '--header=BRANCH / REVISION               LOCATION\nType to search branch/path | Enter open | Esc cancel | Ctrl-/ preview',
+    '--bind=ctrl-/:toggle-preview',
+    `--preview-window=down,6,wrap${terminalRows < 24 ? ',hidden' : ''}`,
     `--preview=${PREVIEW}`,
   ];
+  if (!useColor) args.push('--color=bw');
   if (query) {
     // With a query, a single surviving candidate is unambiguous — take it
     // rather than making the user press Enter on a one-item list.
     args.push(`--query=${query}`, '--select-1', '--exit-0');
   }
   const r = spawnSync('fzf', args, {
-    input: candidates.join('\n') + '\n',
+    input: rows.map((row) => row.text).join('\n') + '\n',
     encoding: 'utf8',
     stdio: ['pipe', 'pipe', 'inherit'],
   });
@@ -988,7 +1010,9 @@ function fzfPick(candidates) {
   if (r.status !== 0) die('E_FZF', `fzf exited with status ${r.status}`);
   const sel = (r.stdout ?? '').trim();
   if (!sel) die('E_INTERRUPTED', 'cancelled');
-  return sel;
+  const path = byKey.get(sel.split('\t')[0]);
+  if (path === undefined) die('E_FZF', 'fzf returned an unknown worktree selection');
+  return path;
 }
 
 // Non-interactive scoring pass. `fzf --filter` prints ranked matches and never
@@ -1112,8 +1136,8 @@ async function main() {
     }
   }
 
-  // Only --no-main needs every entry's metadata up front; everything else
-  // resolves the one it prints.
+  // --no-main needs metadata before filtering. The interactive picker will
+  // also resolve metadata, after filtering, to display and search branches.
   if (values['no-main']) {
     await resolveMeta(paths, byPath);
     paths = paths.filter((p) => !byPath.get(p)?.isMain);
@@ -1122,12 +1146,12 @@ async function main() {
   if (paths.length === 0) {
     die('E_NO_MATCH', values.local
       ? 'this repository has no worktrees. Create one with `gwq add <branch>`.'
-      : "no worktrees found under gwq's base directory, ~/.herdr/worktrees, or "
+      : "no worktrees found under gwq's base directory, ~/.herdr/worktrees, the Codex worktree root, or "
         + 'any .claude/worktrees below the ghq root. Create one with `gwq add <branch>`.');
   }
 
-  // fzf matches on the path, exactly as the original shell function did — the
-  // path already encodes host, owner, repo and a branch slug.
+  // Noninteractive filtering retains path-only matching. The interactive
+  // picker additionally searches actual branch labels.
   const shape = (p) => {
     const m = byPath.get(p) ?? { path: p, branch: '', commit: '', isMain: false };
     return {
@@ -1172,11 +1196,12 @@ async function main() {
     selected = hits[0];
     matches = hits.length;
   } else {
-    selected = fzfPick(paths);
+    await resolveMeta(paths, byPath);
+    selected = fzfPick(paths, byPath);
     matches = 1;
   }
 
-  // --quiet prints only the path, so it never pays for a git call here.
+  // --quiet needs no additional metadata here. Interactive rows already have it.
   if (!isQuiet) await resolveMeta([selected], byPath);
   const picked = byPath.get(selected) ?? { path: selected, branch: '', commit: '', isMain: false };
 

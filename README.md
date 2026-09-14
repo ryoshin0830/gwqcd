@@ -1,20 +1,25 @@
 # gwqcd
 
 Pick a git worktree with [fzf](https://github.com/junegunn/fzf) and `cd` into it — the ones
-[gwq](https://github.com/d-kuro/gwq) makes, the ones `claude -w` makes, and the ones
-[herdr](https://herdr.dev) makes.
+[gwq](https://github.com/d-kuro/gwq), `claude -w`,
+[herdr](https://herdr.dev), and Codex App make.
 
 ```console
 $ gwqcd
   worktree>
-  ▌ /Users/you/worktrees/github.com/you/api/feat-login
-    /Users/you/worktrees/github.com/you/api/fix-cache
-    /Users/you/ghq/github.com/you/api/.claude/worktrees/drifting-giggling-pond
-    /Users/you/.herdr/worktrees/api/worktree-brave-meadow-2b28
-  ╭───────────────────────────────────────╮
-  │ 8f2c1a9 Add the login form            │
-  │ 3b7d004 Wire up the session store     │
-  ╰───────────────────────────────────────╯
+  BRANCH / REVISION               LOCATION
+  ▌ feat/login                    ~/worktrees/github.com/you/api/feat-login
+    fix/cache                     ~/worktrees/github.com/you/api/fix-cache
+    claude/session                ~/ghq/github.com/you/api/.claude/worktrees/drifting-giggling-pond
+    herdr/session                 ~/.herdr/worktrees/api/worktree-brave-meadow-2b28
+    detached@8f2c1a9b              ~/.codex/worktrees/4e86/api
+  ╭──────────────────────────────────────────────────────────────────────╮
+  │ Branch: feat/login                                                   │
+  │ Path: /Users/you/worktrees/github.com/you/api/feat-login               │
+  │ Commit: 8f2c1a9b…                                                     │
+  │                                                                      │
+  │ 8f2c1a9 Add the login form                                            │
+  ╰──────────────────────────────────────────────────────────────────────╯
 $ pwd
 /Users/you/worktrees/github.com/you/api/feat-login
 ```
@@ -67,21 +72,29 @@ and Node >= 20.12. **No `jq`.** `ghq` is optional — see below.
 | `gwq` | `gwq config get worktree.basedir` | `gwq add` |
 | `claude` | `<repo>/.claude/worktrees/<slug>` | `claude -w` |
 | `herdr` | `~/.herdr/worktrees/<repo>/<slug>` | `herdr worktree create` |
+| `codex` | `$CODEX_HOME/worktrees/<id>/<repo>` (default `~/.codex/worktrees`) | Codex App |
 | `other` | anywhere else | only ever seen with `--local` |
 
-`--source` takes a comma-separated list, so `--source claude,herdr` is every
-agent worktree and nothing else.
+`--source` takes a comma-separated list, so `--source claude,herdr,codex`
+selects all discovered agent worktrees. Use `--source codex` for Codex alone.
+
+Codex discovery uses a nonempty `CODEX_HOME` when set (including `~/…`),
+otherwise `~/.codex`. It searches the `worktrees` child of that directory.
+Missing or unreadable roots are skipped; no Codex CLI is required. Codex paths
+keep their `codex` source even when the gwq base directory contains that root.
+Claude worktrees nested inside them retain the `claude` source.
 
 `claude -w` puts its worktree *inside* the repository it belongs to, so `gwqcd`
 looks inside every repository under `ghq root` — and inside every worktree it
 already found, because an agent can start an agent. It never descends into a
-repository past that one directory, which is what keeps the three walks at
-about 42ms across 44 repositories and 129 worktrees.
+repository past that one directory, keeping discovery independent of the size
+of checked-out source files and dependencies.
 
-`ghq` is optional. Without it there is no ghq root to search, so agent
-worktrees are still found inside anything under the gwq base directory or the
-herdr root — just not inside your main clones. A repository somewhere else
-entirely, say `~/dev/project`, is not searched at all.
+`ghq` is optional. Roots come from `ghq root --all`, falling back to `GHQ_ROOT`
+and then `~/ghq`. Claude worktrees are also found inside worktrees under the
+gwq, Herdr, and Codex roots. A repository somewhere else entirely, say
+`~/dev/project`, is not searched globally; `--local` asks Git for all worktrees
+of the current repository regardless of location.
 
 `--source gwq` gives you a picker with no agent worktrees in it.
 
@@ -90,15 +103,22 @@ entirely, say `~/dev/project`, is not searched at all.
 `gwq list -g` shells out to git for every entry it finds under the base
 directory, including files inside worktrees: **43.7 seconds** on 115 worktrees
 here, up from 7.6 seconds when that was last measured in August as worktrees
-accumulated. `gwqcd` walks its three roots instead and stops at each worktree,
-then asks git for branch and commit only for the entries it is about to print.
-Same answers, about **150ms** for a jump — roughly 94ms of discovery, 38ms of
+accumulated. `gwqcd` walks its configured roots instead and stops at each worktree,
+then asks Git for metadata as needed.
+The following measurements predate Codex support (2026-09-09): about **150ms**
+for a jump — roughly 94ms of discovery, 38ms of
 checking that git, gwq and fzf exist, and 33ms of node starting up.
 
-`--list --json` is the expensive mode, near 640ms, because it pays one
-`git rev-parse` per worktree (sixteen at a time) to fill in every branch and
-commit. Interactive picking resolves metadata only for the one worktree it
-prints.
+In that historical benchmark, `--list --json` took about 640ms. The current
+interactive picker also resolves metadata for all filtered candidates, sixteen
+at a time, so it can display and search real branch names. Local discovery
+reuses metadata from `git worktree list`. Noninteractive `--quiet` and plain
+`--list` still avoid metadata unless a filter requires it.
+
+With Codex support on 2026-09-14, six runs of `node bin/gwqcd.mjs --list`
+had a median of **196.5ms** for 141 worktrees, compared with **224.5ms** for
+139 entries before the change. These are whole-command measurements on one
+machine; cache and scheduling variation mean this is not a speedup guarantee.
 
 ## Why `--init` exists
 
@@ -134,7 +154,7 @@ gwqcd [options] [<query>]
 | `--query <q>` | initial fzf query (same as the positional) |
 | `--local` | only the current repository's worktrees (default: all) |
 | `--no-main` | hide main worktrees, leaving only linked ones |
-| `--source <list>` | comma-separated `gwq` \| `claude` \| `herdr` \| `other` \| `all` (default: `all`) |
+| `--source <list>` | comma-separated `gwq` \| `claude` \| `herdr` \| `codex` \| `other` \| `all` (default: `all`) |
 | `--list` | print every candidate instead of picking one |
 | `--json` | stdout = 1-line JSON, never opens the fzf UI |
 | `--quiet` | stdout = path only |
@@ -143,7 +163,17 @@ gwqcd [options] [<query>]
 | `-V`, `--version` | show version |
 
 A query pre-filters fzf and auto-selects a unique match, so `gwqcd login`
-usually lands without a keystroke.
+usually lands without a keystroke. In the interactive picker, search matches
+branch names and displayed paths. Branch names come from Git, including for
+Codex directories with opaque IDs. Detached worktrees show `detached@<SHA>`;
+unreadable metadata shows `(unavailable)`.
+
+The list uses the full width, with branch first and home paths shortened to
+`~/…`. The bottom preview shows the full path, branch, commit and recent log.
+Press **Ctrl-/** to toggle it; terminals shorter than 24 rows start with it
+hidden. **Enter** opens the selected worktree and **Esc** cancels. Color is
+optional: the same labels remain readable with `--no-color` or `NO_COLOR`.
+Noninteractive queries (`--json`, `--list`, or no TTY) still match paths only.
 
 ## For scripts and AI agents
 
@@ -160,10 +190,11 @@ $ gwqcd --list --json --no-main
 `branch` is the real ref name, which the directory slug does not always carry —
 `feat/login` lives in a directory called `feat-login`, and `claude -w` named a
 directory `drifting-giggling-pond` for a branch called
-`fix/editor-chat-domain-guide`.
+`fix/editor-chat-domain-guide`. Codex App can create detached worktrees:
+their `branch` is `""`, while `commit` is the actual Git commit hash.
 
-`source` names the tool whose convention created the worktree. A `claude` or
-`herdr` worktree was handed to another agent session, so `--source gwq` is the
+`source` names the tool whose convention created the worktree. A `claude`,
+`herdr`, or `codex` worktree was handed to another agent session, so `--source gwq` is the
 safer request when you need somewhere to work.
 
 `matches` tells you whether the query was unique — `> 1` means the best-scoring

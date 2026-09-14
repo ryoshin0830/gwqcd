@@ -5,7 +5,8 @@ description: >
   every worktree with its real branch name and the tool that created it —
   covering gwq worktrees, the ones `claude -w` puts at
   <repo>/.claude/worktrees/<slug>, and the ones herdr puts under
-  ~/.herdr/worktrees. Use this skill when work must happen in a worktree that
+  ~/.herdr/worktrees, plus Codex App worktrees under $CODEX_HOME/worktrees
+  (default ~/.codex/worktrees). Use this skill when work must happen in a worktree that
   already exists — not for creating worktrees, cloning repositories, or
   locating a main clone.
 when_to_use: |
@@ -27,7 +28,7 @@ allowed-tools: Bash
 
 # gwqcd — resolve a git worktree path, whichever tool made it
 
-`gwqcd` finds git worktrees in three places and prints the selected path. With
+`gwqcd` finds git worktrees in known source roots and prints the selected path. With
 `--json` it never opens a UI, so it is safe to call from an agent session.
 
 | `source` | location | created by |
@@ -35,7 +36,12 @@ allowed-tools: Bash
 | `gwq` | `gwq config get worktree.basedir` | `gwq add` |
 | `claude` | `<repo>/.claude/worktrees/<slug>` | `claude -w` |
 | `herdr` | `~/.herdr/worktrees/<repo>/<slug>` | herdr |
+| `codex` | `$CODEX_HOME/worktrees/<id>/<repo>` (default `~/.codex/worktrees`) | Codex App |
 | `other` | anywhere else | only seen with `--local` |
+
+Nonempty `CODEX_HOME` overrides `~/.codex`; `~/…` is expanded. Missing roots
+are skipped and no Codex CLI is required. Codex worktrees are often detached:
+expect `branch: ""` and use `commit` when identifying the checked-out revision.
 
 ## Prerequisites (verify before invoking)
 
@@ -51,7 +57,8 @@ someone who has dozens.
 
 If any is missing, tell the user to run `brew install git fzf d-kuro/tap/gwq`
 rather than calling gwqcd and reporting exit 127. `jq` is **not** required, and
-`ghq` is **optional** — without it the `claude` source is simply empty.
+`ghq` is **optional** — roots fall back to `GHQ_ROOT`, then `~/ghq`.
+Claude worktrees nested in discovered worktrees are also included.
 
 ## Recommended call
 
@@ -89,6 +96,7 @@ gwqcd --list --json --no-main       # linked worktrees only
 gwqcd --list --json --local         # only the current repository's
 gwqcd --list --json --source gwq    # no agent worktrees
 gwqcd --list --json --source claude # only `claude -w` worktrees
+gwqcd --list --json --source codex  # only Codex App worktrees
 ```
 
 ## Output (stdout, 1 line)
@@ -140,7 +148,7 @@ path can run commands against the wrong branch.
 
 ## An agent worktree is somebody else's workspace
 
-A `source` of `claude` or `herdr` means that worktree was handed to another
+A `source` of `claude`, `herdr`, or `codex` means that worktree was handed to another
 agent session. Running commands there, and especially committing there,
 collides with work in progress that is not yours.
 
@@ -150,7 +158,7 @@ When you need a worktree to *work in*, ask for one that is not an agent's:
 gwqcd --json --source gwq <query>
 ```
 
-Read a `claude` or `herdr` worktree when the user asked about that specific
+Read a `claude`, `herdr`, or `codex` worktree when the user asked about that specific
 one — "what is the drifting-giggling-pond agent doing?" is a fair question.
 Do not adopt it as your own working directory unless the user says so.
 
@@ -192,7 +200,7 @@ On `E_NO_MATCH`, the worktree does not exist yet. Say so and offer `gwqpull`
 - Call `gwqcd` without `--json` and try to parse the box output.
 - Treat a `matches > 1` result as a confirmed choice.
 - Infer the branch from the directory name instead of reading `branch`.
-- Start working in a `source` of `claude` or `herdr` without being asked to.
+- Start working in a `source` of `claude`, `herdr`, or `codex` without being asked to.
 - Run `gwqcd --init` to modify the user's shell config without being asked.
 - Run `gwq remove` / `git worktree remove` as a follow-up. Deleting a worktree
   can destroy uncommitted work; that is the user's call.
@@ -202,3 +210,7 @@ On `E_NO_MATCH`, the worktree does not exist yet. Say so and offer `gwqpull`
 `cd` to the returned path if the harness can change cwd; otherwise pass the path
 explicitly to subsequent commands (`git -C "<path>" status`). Mention the branch
 you landed on — worktrees are easy to confuse.
+
+Interactive users can search actual branch names and displayed paths. Agent
+commands using `--json` or `--list` still match paths only; inspect JSON branch
+metadata when matching a branch independently of its directory name.
