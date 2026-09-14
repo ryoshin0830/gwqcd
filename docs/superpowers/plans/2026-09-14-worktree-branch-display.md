@@ -66,4 +66,7 @@ and screenshots under docs/verification/2026-09-14-docker/.
 - [x] Update current UI, search and metadata-cost descriptions; remove the obsolete prohibition on branch columns. Keep historical benchmarks explicitly historical.
 - [x] Run the new suite and real-tool smoke inside the existing dedicated Linux container with current bin/test/package files copied in. Run actual fzf through tmux: branch search, detached selection, Enter, Escape, preview toggle, narrow terminal.
 - [x] Capture and inspect real terminal screenshots, record measured startup time, and request independent code review while completing the visual checks.
-- [ ] Commit, push to PR #2, update its description and post current screenshots. Verify remote head, body/comment, loaded images and clean local status.
+- [x] Commit, push to PR #2, update its description and post current screenshots. Verify remote head, body/comment, loaded images and clean local status.
+
+Delivery: PR #2 updated; screenshot comment 5659131334 verified through the
+GitHub API and browser (all three images loaded). Runtime source is 6ad5d69.
