@@ -1,6 +1,6 @@
 # Worktree Picker UX Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Make branches and detached revisions recognizable and searchable in the interactive picker without losing exact navigation paths.
 
@@ -26,7 +26,7 @@ branch label + tab + display path. branchLabel(meta) returns actual branch,
 detached@<8-char SHA>, or (unavailable). preview(key) returns full details and
 Git history using spawnSync with separate arguments.
 
-- [ ] Add regression tests before implementation:
+- [x] Add regression tests before implementation:
 
 ```js
 assert.equal(branchLabel({branch:'feat/login',commit:'abcdef0123'}), 'feat/login');
@@ -38,9 +38,9 @@ assert.equal(JSON.parse(Buffer.from(row.key,'base64url')).path, row.path);
 assert.ok(row.text.includes('~/.codex/worktrees/id/repo'));
 ```
 
-- [ ] Run `node --test test/picker.test.mjs` and confirm missing-module failure.
-- [ ] Implement row construction, control-character escaping, padded labels (cap padding at 32; never truncate labels), and preview with full metadata/Git log. Invalid preview keys fail without running Git.
-- [ ] Integrate main with these fzf options:
+- [x] Run `node --test test/picker.test.mjs` and confirm missing-module failure.
+- [x] Implement row construction, control-character escaping, 32-cell terminal tab stops (never truncate labels), and preview with full metadata/Git log. Invalid preview keys fail without running Git.
+- [x] Integrate main with these fzf options:
 
 ```js
 ['--height=70%', '--layout=reverse', '--border', '--ansi',
@@ -55,15 +55,15 @@ Resolve selected key through the rows map and reject unknown keys as E_FZF.
 Call resolveMeta(paths, byPath) only on the interactive pick branch, reusing
 local and --no-main metadata already present.
 
-- [ ] Add CLI integration tests with a TTY preload and fzf stub to verify row transport, preview/options and exact --quiet output. Test unknown-key rejection and existing machine-mode contracts.
-- [ ] Run `npm test` and `npm pack --dry-run`; verify picker module is packaged.
+- [x] Add CLI integration tests with a TTY preload and fzf stub to verify row transport, preview/options and exact --quiet output. Test unknown-key rejection and existing machine-mode contracts.
+- [x] Run `npm test` and `npm pack --dry-run`; verify picker module is packaged.
 
 ## Task 2: Documentation, visual QA, and PR delivery
 
 Files: README.md, CLAUDE.md, .claude/skills/gwqcd/SKILL.md, design/plan,
 and screenshots under docs/verification/2026-09-14-docker/.
 
-- [ ] Update current UI, search and metadata-cost descriptions; remove the obsolete prohibition on branch columns. Keep historical benchmarks explicitly historical.
-- [ ] Run the new suite and real-tool smoke inside the existing dedicated Linux container with current bin/test/package files copied in. Run actual fzf through tmux: branch search, detached selection, Enter, Escape, preview toggle, narrow terminal.
-- [ ] Capture and inspect real terminal screenshots, record measured startup time, and request independent code review while completing the visual checks.
+- [x] Update current UI, search and metadata-cost descriptions; remove the obsolete prohibition on branch columns. Keep historical benchmarks explicitly historical.
+- [x] Run the new suite and real-tool smoke inside the existing dedicated Linux container with current bin/test/package files copied in. Run actual fzf through tmux: branch search, detached selection, Enter, Escape, preview toggle, narrow terminal.
+- [x] Capture and inspect real terminal screenshots, record measured startup time, and request independent code review while completing the visual checks.
 - [ ] Commit, push to PR #2, update its description and post current screenshots. Verify remote head, body/comment, loaded images and clean local status.

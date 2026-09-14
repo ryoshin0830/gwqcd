@@ -52,3 +52,37 @@ Full-suite and real-tool results, live listing, and Escape behavior:
 Actual interactive fzf selection with Codex candidates and Git log preview:
 
 ![Codex worktree selection in Docker](docker-fzf.png)
+
+## Branch picker UX follow-up
+
+Verified runtime source: `6ad5d69` (2026-09-14). Current bin and test files were
+copied into the same isolated container described above.
+
+- Host and container suites: **90 passed, 0 failed, 0 skipped** each.
+- Independent reviewer: all 90 tests passed; no blocking findings.
+- All 12 real-tool integration checks above passed again.
+- Typed `codex/named` in the real fzf UI: one match despite the directory being
+  `b123/general`; Enter changed the shell directory to that exact worktree.
+- Typed `detached@`: selected the detached fixture; Enter changed the shell
+  directory to `/home/verify/.codex/worktrees/4e86/general`.
+- Escape returned 130 and preserved that working directory.
+- Ctrl-/ opened and closed the bottom preview. At 640 × 320 the preview started
+  hidden; all six candidates remained visible. At 1200 × 650 it started open.
+- Startup from sending `gwqcd` to observing the populated six-candidate list:
+  155.8, 144.9, 165.8ms; median **155.8ms**. This includes Docker/tmux polling
+  overhead and is a small-fixture observation, not a large-repository benchmark.
+- `npm pack --dry-run` includes the new `bin/picker.mjs`; `git diff --check`
+  passed. Unit tests also cover Unicode/control characters, exact path mapping,
+  colorless labels, malformed selection keys and safe Git preview arguments.
+
+Branch-first list with full details below:
+
+![Branch picker with details](branch-picker-wide.png)
+
+Searching the actual branch rather than the opaque directory ID:
+
+![Actual branch search](branch-picker-search.png)
+
+Short terminal with preview initially hidden:
+
+![Compact branch picker](branch-picker-narrow.png)
