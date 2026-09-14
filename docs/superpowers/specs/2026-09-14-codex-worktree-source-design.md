@@ -1,7 +1,7 @@
 # Codex App worktree discovery
 
-Status: proceeding with the presented design after the user's instruction to
-continue through implementation and opening a PR.
+Status: implemented and verified; proceeding to PR delivery. The user directed
+continuation through implementation and opening a PR after this design was presented.
 
 ## Investigation
 

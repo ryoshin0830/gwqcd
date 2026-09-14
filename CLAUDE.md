@@ -13,9 +13,10 @@ of `README.md` instead.
 
 A small Node.js CLI (~1,090 lines, zero runtime dependencies) that:
 
-1. Finds worktrees by walking three roots — gwq's base directory, the ghq root
-   for the `.claude/worktrees` inside its repositories, and `~/.herdr/worktrees`
-   — falling back to `gwq list -g --json` only if all three come up empty. With
+1. Finds worktrees by walking gwq's base directory, ghq roots for the
+   `.claude/worktrees` inside their repositories, `~/.herdr/worktrees`, and
+   `$CODEX_HOME/worktrees` (default `~/.codex/worktrees`). It supplements these
+   with `gwq list -g --json` only if the gwq base directory cannot be walked. With
    `--local` it asks `git worktree list --porcelain` instead.
 2. Picks one worktree — interactively via `fzf`, or non-interactively via
    `fzf --filter`.
@@ -152,7 +153,9 @@ every rev that follows it, so `rev-parse --abbrev-ref HEAD HEAD` returns the
 branch name twice. The sha must be asked for first; the first cut of this
 shipped the branch name in the `commit` field.
 
-### I7c. Three roots, and the ghq root is walked for what is *inside* it
+### I7c. Original three roots, and ghq is walked for what is *inside* it
+
+This section records the 2026-09-09 design. I7f adds the Codex root.
 
 `claude -w` creates a real linked worktree at `<repo>/.claude/worktrees/<slug>`
 — inside the main worktree, which is the one place I7b's walk refuses to enter.
@@ -360,6 +363,29 @@ plus the system directories git lives in, hands every child a fresh empty
 `HOME` unless a fixture supplies one, and deletes `GHQ_ROOT` for the same
 reason it already deleted `FORCE_COLOR`.
 
+### I7f. Codex is another discovery root, including detached worktrees
+
+`codexRoot()` resolves nonempty `CODEX_HOME` (with tilde expansion), falling
+back to `~/.codex`, then appends `worktrees`. Reuse `usableRoots()` and the
+bounded walker; an absent or unreadable Codex root is optional and does not
+change gwq's fallback rules. No Codex subprocess or new dependency is needed.
+
+Sources now include `codex`. Global merging recognizes the canonical Codex
+prefix even when the gwq walk reaches it first, preserving candidate order
+and deduplication. `sourceRoots()` gives that prefix precedence for local and
+fallback classification too. Explicit nested `.claude/worktrees` entries
+retain `claude` as the more specific source.
+
+Detached worktrees have `branch: ""`; resolve their commit and `isMain` through
+the existing Git metadata path. The directory's opaque ID is not a branch.
+Clear inherited `CODEX_HOME` in test `run()` before applying fixture overrides.
+
+Live verification on 2026-09-14 found two Codex entries, including the reported
+`4e86/general`, for 141 total (124 gwq, 14 claude, 1 herdr, 2 codex). Six
+whole-command `--list` runs had median 196.5ms against 224.5ms before the
+change. These measurements include startup and dependency checks, and do not
+prove a speedup or an isolated discovery cost.
+
 ### I8. The branch name comes from git, not from the path
 
 `feat/login` is checked out in a directory named `feat-login`. The slug is
@@ -415,7 +441,7 @@ Selection:
   "branch":        "<ref name, may contain slashes>",
   "commit":        "<full commit hash>",
   "isMain":        true | false,
-  "source":        "gwq" | "claude" | "herdr" | "other",
+  "source":        "gwq" | "claude" | "herdr" | "codex" | "other",
   "matches":       <number of candidates the query matched>
 }
 ```

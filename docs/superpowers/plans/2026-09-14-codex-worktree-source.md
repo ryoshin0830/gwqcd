@@ -24,7 +24,7 @@
 New codexRoot() returns the configured worktree root string. Existing sourceRoots()
 provides canonical prefixes to classifySource() for local and fallback rows.
 
-- [ ] Add a real detached worktree regression and scrub inherited CODEX_HOME in run().
+- [x] Add a real detached worktree regression and scrub inherited CODEX_HOME in run().
 
 ```js
 delete childEnv.CODEX_HOME;
@@ -54,8 +54,8 @@ test('Codex detached worktrees are globally discoverable', (t) => {
 });
 ```
 
-- [ ] Run `node --test --test-name-pattern='Codex' test/cli.test.mjs`; expect failure because the candidate is missing.
-- [ ] Add codex to SOURCES and help. Add the root to usableRoots specs after herdr, and assign its canonical prefix precedence during merging.
+- [x] Run `node --test --test-name-pattern='Codex' test/cli.test.mjs`; expect failure because the candidate is missing.
+- [x] Add codex to SOURCES and help. Add the root to usableRoots specs after herdr, and assign its canonical prefix precedence during merging.
 
 ```js
 function codexRoot() {
@@ -76,8 +76,8 @@ if (!found.has(e.path)) found.set(e.path, source);
 [[codexRoot(), 'codex'], [dirs, 'gwq'], [herdrRoot(), 'herdr']]
 ```
 
-- [ ] Expand real-Git regressions to cover named branches; codex-only, mixed and all filters; --quiet; --local; CODEX_HOME override, empty and tilde values; nested Claude agents; root overlap and symlink canonicalization; missing/unreadable roots; fallback supplementation. Reuse repoAt/homeShim and isolated HOME. Each test asserts returned paths, source, metadata or error contracts through the CLI.
-- [ ] Run `npm test`; all existing and new cases must pass. Commit code and tests.
+- [x] Expand real-Git regressions to cover named branches; codex-only, mixed and all filters; --quiet; --local; CODEX_HOME override, empty and tilde values; nested Claude agents; root overlap and symlink canonicalization; missing/unreadable roots; fallback supplementation. Reuse repoAt/homeShim and isolated HOME. Each test asserts returned paths, source, metadata or error contracts through the CLI.
+- [x] Run `npm test`; all existing and new cases must pass. Commit code and tests.
 
 ## Task 2: Document and verify the delivered interface
 
@@ -85,19 +85,26 @@ if (!found.has(e.path)) found.set(e.path, source);
 
 **Interfaces:** Public source enum gains codex; no JSON fields are removed.
 
-- [ ] Add this source row to the user and agent tables:
+- [x] Add this source row to the user and agent tables:
 
 ```markdown
 | `codex` | `$CODEX_HOME/worktrees/<id>/<repo>` (default `~/.codex/worktrees`) | Codex App |
 ```
 
-- [ ] Explain CODEX_HOME override, detached branch values and --source codex. Include Codex in existing agent-worktree guidance. Update current root descriptions and enum lists; retain dated historical measurements as historical.
-- [ ] Run `npm test`, `npm pack --dry-run`, and `git diff --check`. Confirm the package contains only intended runtime files.
-- [ ] Run live `--list --json`, `--source codex`, `--quiet /Users/shin-ryo/.codex/worktrees/4e86/general`, and local selection. Compare branch, commit and isMain with Git. Compare six samples of `node bin/gwqcd.mjs --list` with the measured baseline median of 224.5 ms.
-- [ ] Use a verification subagent to review changes against the design, while independently checking documentation and live behavior. Resolve concrete issues and rerun affected checks.
+- [x] Explain CODEX_HOME override, detached branch values and --source codex. Include Codex in existing agent-worktree guidance. Update current root descriptions and enum lists; retain dated historical measurements as historical.
+- [x] Run `npm test`, `npm pack --dry-run`, and `git diff --check`. Confirm the package contains only intended runtime files.
+- [x] Run live `--list --json`, `--source codex`, `--quiet /Users/shin-ryo/.codex/worktrees/4e86/general`, and local selection. Compare branch, commit and isMain with Git. Compare six samples of `node bin/gwqcd.mjs --list` with the measured baseline median of 224.5 ms.
+- [x] Use a verification subagent to review changes against the design, while independently checking documentation and live behavior. Resolve concrete issues and rerun affected checks.
 - [ ] Commit verified documentation, push the branch, and create a PR against main with gh-pr-body (--body-file). Fetch the PR back to verify head, base, diff and description; open its review panel in Codex and verify the open result.
 
 ## Progress and evidence
 
 - Initial current-main baseline: 72 tests passed; 139 live entries (124 gwq, 14 claude, 1 herdr), no Codex paths.
 - Baseline --list samples (ms): 277, 226, 243, 223, 218, 185; median 224.5.
+- Regression cycle: new discovery/source tests failed on the baseline with missing candidates and unknown source codex; all 82 tests pass after implementation (zero skips).
+- Live result: 141 entries, adding two Codex paths; all original 139 paths retain their source with no duplicates.
+- The reported general worktree has branch "", isMain false and commit 4dd51e3b85c4efdd250d706ccc3c6e212a241211, matching Git.
+- Generated zsh, bash and fish functions each changed the shell directory to the reported Codex worktree using --source codex.
+- After --list samples (ms): 201, 198, 195, 189, 195, 214; median 196.5. Whole-command timings, not an isolated walker measurement or guaranteed speedup.
+- Package dry-run: exactly LICENSE, README.md, bin/gwqcd.mjs and package.json; no dependencies bundled.
+- Independent code review found no issues and repeated all 82 tests and package/diff checks successfully.
