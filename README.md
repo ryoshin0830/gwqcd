@@ -7,15 +7,19 @@ Pick a git worktree with [fzf](https://github.com/junegunn/fzf) and `cd` into it
 ```console
 $ gwqcd
   worktree>
-  ▌ /Users/you/worktrees/github.com/you/api/feat-login
-    /Users/you/worktrees/github.com/you/api/fix-cache
-    /Users/you/ghq/github.com/you/api/.claude/worktrees/drifting-giggling-pond
-    /Users/you/.herdr/worktrees/api/worktree-brave-meadow-2b28
-    /Users/you/.codex/worktrees/4e86/api
-  ╭───────────────────────────────────────╮
-  │ 8f2c1a9 Add the login form            │
-  │ 3b7d004 Wire up the session store     │
-  ╰───────────────────────────────────────╯
+  BRANCH / REVISION               LOCATION
+  ▌ feat/login                    ~/worktrees/github.com/you/api/feat-login
+    fix/cache                     ~/worktrees/github.com/you/api/fix-cache
+    claude/session                ~/ghq/github.com/you/api/.claude/worktrees/drifting-giggling-pond
+    herdr/session                 ~/.herdr/worktrees/api/worktree-brave-meadow-2b28
+    detached@8f2c1a9b              ~/.codex/worktrees/4e86/api
+  ╭──────────────────────────────────────────────────────────────────────╮
+  │ Branch: feat/login                                                   │
+  │ Path: /Users/you/worktrees/github.com/you/api/feat-login               │
+  │ Commit: 8f2c1a9b…                                                     │
+  │                                                                      │
+  │ 8f2c1a9 Add the login form                                            │
+  ╰──────────────────────────────────────────────────────────────────────╯
 $ pwd
 /Users/you/worktrees/github.com/you/api/feat-login
 ```
@@ -100,15 +104,16 @@ of the current repository regardless of location.
 directory, including files inside worktrees: **43.7 seconds** on 115 worktrees
 here, up from 7.6 seconds when that was last measured in August as worktrees
 accumulated. `gwqcd` walks its configured roots instead and stops at each worktree,
-then asks git for branch and commit only for the entries it is about to print.
+then asks Git for metadata as needed.
 The following measurements predate Codex support (2026-09-09): about **150ms**
 for a jump — roughly 94ms of discovery, 38ms of
 checking that git, gwq and fzf exist, and 33ms of node starting up.
 
-`--list --json` is the expensive mode, near 640ms, because it pays one
-`git rev-parse` per worktree (sixteen at a time) to fill in every branch and
-commit. Interactive picking resolves metadata only for the one worktree it
-prints.
+In that historical benchmark, `--list --json` took about 640ms. The current
+interactive picker also resolves metadata for all filtered candidates, sixteen
+at a time, so it can display and search real branch names. Local discovery
+reuses metadata from `git worktree list`. Noninteractive `--quiet` and plain
+`--list` still avoid metadata unless a filter requires it.
 
 With Codex support on 2026-09-14, six runs of `node bin/gwqcd.mjs --list`
 had a median of **196.5ms** for 141 worktrees, compared with **224.5ms** for
@@ -158,7 +163,17 @@ gwqcd [options] [<query>]
 | `-V`, `--version` | show version |
 
 A query pre-filters fzf and auto-selects a unique match, so `gwqcd login`
-usually lands without a keystroke.
+usually lands without a keystroke. In the interactive picker, search matches
+branch names and displayed paths. Branch names come from Git, including for
+Codex directories with opaque IDs. Detached worktrees show `detached@<SHA>`;
+unreadable metadata shows `(unavailable)`.
+
+The list uses the full width, with branch first and home paths shortened to
+`~/…`. The bottom preview shows the full path, branch, commit and recent log.
+Press **Ctrl-/** to toggle it; terminals shorter than 24 rows start with it
+hidden. **Enter** opens the selected worktree and **Esc** cancels. Color is
+optional: the same labels remain readable with `--no-color` or `NO_COLOR`.
+Noninteractive queries (`--json`, `--list`, or no TTY) still match paths only.
 
 ## For scripts and AI agents
 

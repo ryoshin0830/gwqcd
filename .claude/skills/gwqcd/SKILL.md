@@ -210,3 +210,7 @@ On `E_NO_MATCH`, the worktree does not exist yet. Say so and offer `gwqpull`
 `cd` to the returned path if the harness can change cwd; otherwise pass the path
 explicitly to subsequent commands (`git -C "<path>" status`). Mention the branch
 you landed on — worktrees are easy to confuse.
+
+Interactive users can search actual branch names and displayed paths. Agent
+commands using `--json` or `--list` still match paths only; inspect JSON branch
+metadata when matching a branch independently of its directory name.

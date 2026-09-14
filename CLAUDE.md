@@ -11,7 +11,7 @@ of `README.md` instead.
 
 ## What this package does
 
-A small Node.js CLI (~1,090 lines, zero runtime dependencies) that:
+A small Node.js CLI (zero runtime dependencies) that:
 
 1. Finds worktrees by walking gwq's base directory, ghq roots for the
    `.claude/worktrees` inside their repositories, `~/.herdr/worktrees`, and
@@ -24,7 +24,8 @@ A small Node.js CLI (~1,090 lines, zero runtime dependencies) that:
    (`--quiet`), or one line of JSON (`--json`).
 4. Emits a shell function on `--init <shell>` so the *shell* performs the `cd`.
 
-Single source of behavior: `bin/gwqcd.mjs`.
+CLI/discovery behavior: `bin/gwqcd.mjs`. Interactive row formatting and safe
+Git preview entry point: `bin/picker.mjs`.
 
 Sibling packages built to the same contract: `ghqcd`, `gwqpull`, `ghnew`. The
 invariants below are deliberately near-identical to `ghqcd`'s; when you change
@@ -141,8 +142,10 @@ Verified field-by-field against `gwq list -g --json`: all 43 entries identical
 on branch, commit and isMain. The 44th is a submodule checkout nested inside a
 worktree — its own repository, not somewhere to cd.
 
-Metadata is resolved lazily and only for what gets printed: `--quiet` pays for
-none, a single pick pays for one, `--list --json` and `--no-main` pay for all.
+Metadata is lazy in noninteractive modes: `--quiet` pays for none unless a
+filter needs it, a JSON pick pays for one, and `--list --json` / `--no-main`
+pay for all. Interactive picking resolves all filtered candidates with the
+existing bounded concurrency before fzf, so branch names are searchable.
 
 `--local` asks `git worktree list --porcelain` directly. `gwqListJson()` remains
 as the fallback for when gwq will not name its base directory or the directory
@@ -634,13 +637,6 @@ drive the interactive fzf UI by piping keystrokes into `script` — fzf reads
 - **Creating worktrees.** `gwqcd` navigates; `gwqpull` creates. Keep the split.
 - **Deleting worktrees.** `gwq remove` exists and is destructive; wrapping it
   behind a fuzzy picker is a foot-gun.
-- **A richer fzf display** (repo + branch columns via `--with-nth`). The path
-  already encodes host, owner, repo, tool and branch slug:
-  `…/alchemy/.claude/worktrees/adaptive-hugging-horizon` and
-  `~/.herdr/worktrees/gwqcd/worktree-brave-meadow-2b28` each name their tool,
-  their repository and their slug. Adding the I7c sources did not change this,
-  and the extra columns would still have to guess a base directory to be
-  readable.
 - **Cleaning up finished agent worktrees.** `--source claude` makes the list
   trivial to produce, which is exactly why the deletion is not automated here.
   See `gwq remove` above.
@@ -649,3 +645,18 @@ drive the interactive fzf UI by piping keystrokes into `script` — fzf reads
   looks.
 - **A prompt library, a logger, or a clipboard package.** See I11.
 - **Telemetry / analytics.**
+
+## Interactive picker contract
+
+Display actual Git branches, `detached@<8-char SHA>`, or `(unavailable)` before
+home-shortened paths. Keep complete labels, with fzf tab stops for Unicode.
+Use the bottom preview for full path/branch/commit/log; Ctrl-/ toggles it and
+terminals below 24 rows start with it hidden. Honor NO_COLOR / --no-color.
+
+Rows carry hidden base64url keys; resolve selection through the original path
+map. Never reconstruct navigation paths from rendered text. Preview decodes
+its key and passes the exact path as a Git argument, never as shell source.
+Escape terminal controls in labels and Git history. Interactive queries match
+visible branch/path fields; machine output and noninteractive matching remain
+unchanged. CLI tests use a TTY preload and recording fzf stub; actual keyboard
+behavior and layout require the Docker/tmux verification.

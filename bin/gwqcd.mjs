@@ -6,6 +6,7 @@ import { readFileSync, readdirSync, existsSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join as joinPath, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { pickerRows } from './picker.mjs';
 
 // Read from package.json rather than a hand-maintained constant: `npm version`
 // only bumps the manifest, so a literal here silently drifts and `--version`
@@ -966,25 +967,36 @@ function classifySource(path, roots) {
 
 // ── fzf ──────────────────────────────────────────────────────────────────────
 
-const PREVIEW = 'git -C {} log --oneline -10';
+const PREVIEW = `${shq(process.execPath)} ${shq(fileURLToPath(new URL('./picker.mjs', import.meta.url)))} {1}`;
 
 // Interactive pick. fzf renders on /dev/tty and writes only the selection to
 // stdout, so capturing stdout here does not disturb the UI.
-function fzfPick(candidates) {
+function fzfPick(candidates, meta) {
+  const rows = pickerRows(candidates, meta, { home: homedir(), color: useColor });
+  const byKey = new Map(rows.map((row) => [row.key, row.path]));
+  const terminalRows = process.stderr.rows || process.stdout.rows || process.stdin.rows || 24;
   const args = [
-    '--height=40%',
+    '--height=70%',
     '--layout=reverse',
     '--border',
+    '--ansi',
+    '--delimiter=\t',
+    '--with-nth=2..',
+    '--tabstop=32',
     '--prompt=worktree> ',
+    '--header=BRANCH / REVISION               LOCATION\nType to search branch/path | Enter open | Esc cancel | Ctrl-/ preview',
+    '--bind=ctrl-/:toggle-preview',
+    `--preview-window=down,6,wrap${terminalRows < 24 ? ',hidden' : ''}`,
     `--preview=${PREVIEW}`,
   ];
+  if (!useColor) args.push('--color=bw');
   if (query) {
     // With a query, a single surviving candidate is unambiguous — take it
     // rather than making the user press Enter on a one-item list.
     args.push(`--query=${query}`, '--select-1', '--exit-0');
   }
   const r = spawnSync('fzf', args, {
-    input: candidates.join('\n') + '\n',
+    input: rows.map((row) => row.text).join('\n') + '\n',
     encoding: 'utf8',
     stdio: ['pipe', 'pipe', 'inherit'],
   });
@@ -998,7 +1010,9 @@ function fzfPick(candidates) {
   if (r.status !== 0) die('E_FZF', `fzf exited with status ${r.status}`);
   const sel = (r.stdout ?? '').trim();
   if (!sel) die('E_INTERRUPTED', 'cancelled');
-  return sel;
+  const path = byKey.get(sel.split('\t')[0]);
+  if (path === undefined) die('E_FZF', 'fzf returned an unknown worktree selection');
+  return path;
 }
 
 // Non-interactive scoring pass. `fzf --filter` prints ranked matches and never
@@ -1122,8 +1136,8 @@ async function main() {
     }
   }
 
-  // Only --no-main needs every entry's metadata up front; everything else
-  // resolves the one it prints.
+  // --no-main needs metadata before filtering. The interactive picker will
+  // also resolve metadata, after filtering, to display and search branches.
   if (values['no-main']) {
     await resolveMeta(paths, byPath);
     paths = paths.filter((p) => !byPath.get(p)?.isMain);
@@ -1136,8 +1150,8 @@ async function main() {
         + 'any .claude/worktrees below the ghq root. Create one with `gwq add <branch>`.');
   }
 
-  // fzf matches on the path, exactly as the original shell function did — the
-  // path already encodes host, owner, repo and a branch slug.
+  // Noninteractive filtering retains path-only matching. The interactive
+  // picker additionally searches actual branch labels.
   const shape = (p) => {
     const m = byPath.get(p) ?? { path: p, branch: '', commit: '', isMain: false };
     return {
@@ -1182,11 +1196,12 @@ async function main() {
     selected = hits[0];
     matches = hits.length;
   } else {
-    selected = fzfPick(paths);
+    await resolveMeta(paths, byPath);
+    selected = fzfPick(paths, byPath);
     matches = 1;
   }
 
-  // --quiet prints only the path, so it never pays for a git call here.
+  // --quiet needs no additional metadata here. Interactive rows already have it.
   if (!isQuiet) await resolveMeta([selected], byPath);
   const picked = byPath.get(selected) ?? { path: selected, branch: '', commit: '', isMain: false };
 

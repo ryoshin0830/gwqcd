@@ -98,6 +98,59 @@ const ourStderr = (s) =>
     .filter((l) => l && !/^\(node:\d+\)/.test(l) && !/^\(Use `node --trace-warnings/.test(l))
     .join('\n');
 
+// Exercise the real CLI's interactive branch without opening a terminal in
+// the test runner. fzf records its input/options and returns one original row.
+function interactiveFixture(t, worktrees = WORKTREES) {
+  const shims = makeShims({ json: JSON.stringify(worktrees) });
+  t.after(() => rmSync(shims, { recursive: true, force: true }));
+  const preload = join(shims, 'tty.mjs');
+  writeFileSync(preload, `Object.defineProperty(process.stderr, 'isTTY', { value: true });
+Object.defineProperty(process.stderr, 'rows', { value: Number(process.env.PICKER_ROWS || 40) });\n`);
+  writeFileSync(join(shims, 'fzf'), `#!/bin/sh
+[ "$1" = "--version" ] && { echo 0.74.3; exit 0; }
+printf '%s\\n' "$@" > "$PICKER_ARGS"
+cat > "$PICKER_INPUT"
+if [ "$PICKER_BAD" = 1 ]; then echo invalid-key; else sed -n '2p' "$PICKER_INPUT"; fi
+`);
+  const env = {
+    NODE_OPTIONS: `--import=${preload}`, PICKER_ARGS: join(shims, 'args'),
+    PICKER_INPUT: join(shims, 'rows'),
+  };
+  return { shims, env };
+}
+
+test('interactive picker renders branches but returns the exact original path', (t) => {
+  const path = '/tmp/日本語 space\t"$(not-a-command)"';
+  const fx = interactiveFixture(t, [WORKTREES[0], { ...WORKTREES[1], path }]);
+  const r = run(['--quiet'], fx);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, path + '\n');
+  const rows = readFileSync(fx.env.PICKER_INPUT, 'utf8').trim().split('\n');
+  assert.equal(rows[1].split('\t')[1], 'feat/login');
+  assert.equal(JSON.parse(Buffer.from(rows[1].split('\t')[0], 'base64url')).path, path);
+  const args = readFileSync(fx.env.PICKER_ARGS, 'utf8');
+  assert.ok(args.includes('--with-nth=2..'));
+  assert.ok(args.includes('--preview-window=down,6,wrap\n'));
+  assert.ok(args.includes('--bind=ctrl-/:toggle-preview'));
+  assert.ok(args.includes('--color=bw'));
+  assert.ok(args.includes('picker.mjs'));
+});
+
+test('short terminals start with the preview hidden', (t) => {
+  const fx = interactiveFixture(t);
+  const r = run(['--quiet'], { ...fx, env: { ...fx.env, PICKER_ROWS: '20' } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(readFileSync(fx.env.PICKER_ARGS, 'utf8').includes('--preview-window=down,6,wrap,hidden'));
+});
+
+test('interactive picker rejects unknown selection keys without printing a cd path', (t) => {
+  const fx = interactiveFixture(t);
+  const r = run(['--quiet'], { ...fx, env: { ...fx.env, PICKER_BAD: '1' } });
+  assert.equal(r.status, 1);
+  assert.equal(r.stdout, '');
+  assert.match(r.stderr, /unknown worktree selection/);
+});
+
 // ── --init ───────────────────────────────────────────────────────────────────
 
 for (const shell of ['zsh', 'bash', 'fish']) {
