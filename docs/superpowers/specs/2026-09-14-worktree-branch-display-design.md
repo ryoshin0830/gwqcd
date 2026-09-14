@@ -1,6 +1,6 @@
 # Branch names in the interactive worktree picker
 
-Status: proposed for user review.
+Status: revised after the user's request to improve the UX and implement/push.
 
 ## Problem and evidence
 
@@ -38,10 +38,21 @@ detached@89af2901    /home/verify/.codex/worktrees/4e86/general
   mode used by the shell function.
 - Resolve candidate metadata through the existing bounded parallel resolver
   after source/no-main filtering. Reuse already-resolved local metadata.
-- Keep path matching as the existing query contract. Branch-name search is
-  outside this display-only change.
+- Search both visible branch labels and paths in the interactive UI. Keep
+  noninteractive path matching unchanged for script compatibility.
+- Shorten only the home prefix to ~/ in displayed paths; do not truncate
+  branch names or use directory IDs as branch labels. Use color as secondary
+  emphasis, with complete textual labels when color is disabled.
+- Use the full list width and place the preview below it, showing full
+  branch, path, commit and recent Git history. Ctrl-/ toggles the preview.
+- Use 70% terminal height, a compact header with keyboard hints, and hide the
+  preview initially on terminals shorter than 24 rows. This avoids reducing
+  the candidate list to a sliver on small terminals.
 - Decode the selected display row to the exact original path. Git-log preview
   must also receive only that path; neither labels nor delimiters may reach cd.
+- Carry the original path and metadata in an opaque base64url field hidden
+  from display/search. The preview helper invokes Git with an argument array,
+  so paths containing quotes, shell metacharacters or tabs remain data.
 - Preserve JSON/list output schemas, noninteractive matching, cancellation
   exit codes, and stdout/stderr discipline.
 
